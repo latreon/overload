@@ -1,4 +1,5 @@
 mod classifier;
+mod collector;
 mod killer;
 
 fn main() {
