@@ -313,6 +313,15 @@ mod tests {
     }
 
     #[test]
+    fn fresh_app_starts_selected_on_top_row() {
+        // First populated snapshot must leave the cursor on row 0 (the hottest),
+        // not somewhere in the middle.
+        let a = app_with(vec![row(1, "low", 5.0), row(2, "hot", 90.0), row(3, "mid", 40.0)]);
+        assert_eq!(a.selected, 0);
+        assert_eq!(a.display[0].label, "hot", "row 0 is the highest-CPU process");
+    }
+
+    #[test]
     fn j_moves_down_like_arrow() {
         let mut a = app_with(vec![row(1, "alpha", 9.0), row(2, "bravo", 8.0)]);
         a.handle_key(KeyCode::Char('j'));
