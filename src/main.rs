@@ -86,9 +86,9 @@ fn main() -> io::Result<()> {
 
     let result = run(&mut terminal, &mut collector, &mut app, &mut last);
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    let _ = disable_raw_mode();
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
     result
 }
 
@@ -106,17 +106,9 @@ fn run<B: Backend>(
                 if key.kind == event::KeyEventKind::Press {
                     match app.handle_key(key.code) {
                         Action::Quit => return Ok(()),
-                        Action::Kill(pid) => {
-                            let name = app
-                                .rows
-                                .iter()
-                                .find(|r| r.pid == pid)
-                                .map(|r| r.name.clone())
-                                .unwrap_or_default();
+                        Action::Kill(pid, name) => {
                             match killer::kill(pid, &name) {
-                                Ok(()) => {
-                                    app.status = Some(format!("killing {name} ({pid})…"))
-                                }
+                                Ok(()) => app.status = Some(format!("killing {name} ({pid})…")),
                                 Err(e) => app.status = Some(format!("{name}: {e:?}")),
                             }
                         }

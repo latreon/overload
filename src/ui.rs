@@ -6,7 +6,7 @@ use crossterm::event::KeyCode;
 pub enum Action {
     None,
     Quit,
-    Kill(u32),
+    Kill(u32, String),
 }
 
 pub struct App {
@@ -35,10 +35,12 @@ impl App {
                 if self.selected + 1 < self.rows.len() {
                     self.selected += 1;
                 }
+                self.status = None;
                 Action::None
             }
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
+                self.status = None;
                 Action::None
             }
             KeyCode::Char('k') => {
@@ -50,7 +52,7 @@ impl App {
                         self.status = Some(format!("{} is protected — not killed", r.name));
                         Action::None
                     }
-                    Protection::Killable => Action::Kill(r.pid),
+                    Protection::Killable => Action::Kill(r.pid, r.name.clone()),
                 }
             }
             _ => Action::None,
@@ -95,7 +97,7 @@ mod tests {
     #[test]
     fn k_on_killable_returns_kill_with_pid() {
         let mut a = app_with(vec![row(8981, "python", 99.0)]);
-        assert_eq!(a.handle_key(KeyCode::Char('k')), Action::Kill(8981));
+        assert_eq!(a.handle_key(KeyCode::Char('k')), Action::Kill(8981, "python".to_string()));
     }
 
     #[test]
