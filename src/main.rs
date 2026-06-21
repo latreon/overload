@@ -3,7 +3,6 @@ mod collector;
 mod killer;
 mod ui;
 
-use crate::classifier::{classify, Protection};
 use crate::collector::{Collector, SysStats};
 use crate::ui::{Action, App};
 use crossterm::event::{self, Event};
@@ -19,7 +18,8 @@ use std::time::{Duration, Instant};
 const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
 const RAM_BAR_WIDTH: usize = 4;
-const HELP: &str = " [↑↓] move   [k] kill   [q] quit ";
+const HELP: &str =
+    " j/↑↓ move · g/G ends · / filter · c/m/n sort · t group · k kill · q quit ";
 
 /// Style the persistent action line by what it reports.
 fn action_style(status: &str) -> Style {
@@ -66,18 +66,35 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     ])
     .split(area);
 
-    // Action line — persists after a kill until the next action replaces it.
-    let action = match &app.status {
-        Some(s) => Paragraph::new(format!("  {s}")).style(action_style(s)),
-        None => Paragraph::new("  select a process and press [k] to kill it")
-            .style(Style::default().fg(Color::DarkGray)),
+    // Action line. While typing a filter it shows the live query; otherwise
+    // it persists the last action (killing…/✓ killed/errors) or a hint.
+    let action = if app.filtering {
+        Paragraph::new(format!("  /{}\u{2588}", app.filter))
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    } else {
+        match &app.status {
+            Some(s) => Paragraph::new(format!("  {s}")).style(action_style(s)),
+            None => Paragraph::new("  select a process and press [k] to kill it")
+                .style(Style::default().fg(Color::DarkGray)),
+        }
     };
     frame.render_widget(action, chunks[0]);
 
-    // System summary line.
+    // System summary line, including current view mode.
+    let filter_part = if app.filter.is_empty() {
+        String::new()
+    } else {
+        format!("   /{}", app.filter)
+    };
     let summary = Paragraph::new(format!(
-        " overload   load {:.2}   cpu {:.0}%   mem {:.0}%   {} procs",
-        stats.load1, stats.cpu_pct, stats.mem_pct, stats.proc_count
+        " overload   load {:.2}   cpu {:.0}%   mem {:.0}%   {} procs   ·   sort:{}   group:{}{}",
+        stats.load1,
+        stats.cpu_pct,
+        stats.mem_pct,
+        stats.proc_count,
+        app.sort.label(),
+        if app.grouped { "on" } else { "off" },
+        filter_part,
     ))
     .style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(summary, chunks[1]);
@@ -86,47 +103,54 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
 
     // Pin the selected row near the vertical center; the list scrolls around it.
     let view_h = (table_area.height.saturating_sub(3)).max(1) as usize; // borders + header
-    let len = app.rows.len();
+    let len = app.display.len();
     let offset = if len <= view_h {
         0
     } else {
-        app.selected
-            .saturating_sub(view_h / 2)
-            .min(len - view_h)
+        app.selected.saturating_sub(view_h / 2).min(len - view_h)
     };
     let end = (offset + view_h).min(len);
 
     let header = Row::new(vec!["PID", "CPU", "RAM", "NAME"])
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
-    let rows: Vec<Row> = app.rows[offset..end]
+    let rows: Vec<Row> = app.display[offset..end]
         .iter()
         .enumerate()
-        .map(|(vi, r)| {
+        .map(|(vi, d)| {
             let idx = offset + vi;
-            let protected = classify(&r.name, r.pid) == Protection::Protected;
 
-            let pid_cell = Cell::from(format!("{:>6}", r.pid));
-            let (cpu_cell, ram_cell, name_cell) = if protected {
+            // First column: pid for a single process, or ×N for a group.
+            let id = if d.count > 1 {
+                format!("×{:<4}", d.count)
+            } else {
+                format!("{:>5}", d.pids[0])
+            };
+            let name = if d.protected {
+                format!("{} · protected", d.label)
+            } else {
+                d.label.clone()
+            };
+
+            let cpu_txt = format!("{} {:>3.0}", bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH), d.cpu_pct);
+            let ram_txt = format!("{} {:>4.1}", bar(d.ram_pct / 100.0, RAM_BAR_WIDTH), d.ram_pct);
+
+            let (cpu_cell, ram_cell, name_cell) = if d.protected {
                 let grey = Style::default().fg(Color::DarkGray);
                 (
-                    Cell::from(format!("{} {:>3.0}", bar(r.cpu_pct / 100.0, CPU_BAR_WIDTH), r.cpu_pct))
-                        .style(grey),
-                    Cell::from(format!("{} {:>4.1}", bar(r.ram_pct / 100.0, RAM_BAR_WIDTH), r.ram_pct))
-                        .style(grey),
-                    Cell::from(format!("{} · protected", r.name)).style(grey),
+                    Cell::from(cpu_txt).style(grey),
+                    Cell::from(ram_txt).style(grey),
+                    Cell::from(name).style(grey),
                 )
             } else {
                 (
-                    Cell::from(format!("{} {:>3.0}", bar(r.cpu_pct / 100.0, CPU_BAR_WIDTH), r.cpu_pct))
-                        .style(Style::default().fg(heat(r.cpu_pct))),
-                    Cell::from(format!("{} {:>4.1}", bar(r.ram_pct / 100.0, RAM_BAR_WIDTH), r.ram_pct))
-                        .style(Style::default().fg(heat(r.ram_pct))),
-                    Cell::from(r.name.clone()),
+                    Cell::from(cpu_txt).style(Style::default().fg(heat(d.cpu_pct))),
+                    Cell::from(ram_txt).style(Style::default().fg(heat(d.ram_pct))),
+                    Cell::from(name),
                 )
             };
 
-            let mut row = Row::new(vec![pid_cell, cpu_cell, ram_cell, name_cell]);
+            let mut row = Row::new(vec![Cell::from(id), cpu_cell, ram_cell, name_cell]);
             if idx == app.selected {
                 row = row.style(
                     Style::default()
@@ -148,7 +172,7 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" processes — sorted by CPU ")
+            .title(" processes ")
             .title_bottom(HELP),
     );
 
@@ -204,10 +228,22 @@ fn run<B: Backend>(
                 if key.kind == event::KeyEventKind::Press {
                     match app.handle_key(key.code) {
                         Action::Quit => return Ok(()),
-                        Action::Kill(pid, name) => match killer::kill(pid, &name) {
-                            Ok(()) => app.register_kill(pid, name),
-                            Err(e) => app.status = Some(format!("{name}: {e:?}")),
-                        },
+                        Action::Kill(pids, label) => {
+                            // Kill every pid in the row; register those accepted.
+                            let mut killed = Vec::new();
+                            let mut last_err = None;
+                            for pid in &pids {
+                                match killer::kill(*pid, &label) {
+                                    Ok(()) => killed.push(*pid),
+                                    Err(e) => last_err = Some(e),
+                                }
+                            }
+                            if killed.is_empty() {
+                                app.status = Some(format!("{label}: {last_err:?}"));
+                            } else {
+                                app.register_kill(killed, label);
+                            }
+                        }
                         Action::None => {}
                     }
                 }
@@ -215,15 +251,9 @@ fn run<B: Backend>(
         }
 
         if last.elapsed() >= REFRESH {
-            let selected_pid = app.rows.get(app.selected).map(|r| r.pid);
+            // set_rows rebuilds the view and keeps the cursor on the same row.
             app.set_rows(collector.snapshot());
             *stats = collector.system_stats();
-            // keep the cursor on the same process if it still exists
-            if let Some(pid) = selected_pid {
-                if let Some(idx) = app.rows.iter().position(|r| r.pid == pid) {
-                    app.selected = idx;
-                }
-            }
             *last = Instant::now();
         }
     }
@@ -296,7 +326,7 @@ mod tests {
         let mut app = App::new();
         app.set_rows(rows);
         app.selected = 80;
-        let target_pid = app.rows[80].pid.to_string();
+        let target_pid = app.display[80].pids[0].to_string();
         let text = rendered_text(&app, 80, 10);
         assert!(
             text.contains(&target_pid),
