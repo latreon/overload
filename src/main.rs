@@ -72,10 +72,25 @@ fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(table, area);
 }
 
+/// RAII guard that restores the terminal on every exit path — including panics.
+/// Raw mode and the alternate screen are both restored in `drop`, so even if
+/// `run` panics the terminal is left in a usable state.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
+    // Guard owns raw-mode + alternate-screen restoration from this point on.
+    let _guard = TerminalGuard;
+
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
 
@@ -86,8 +101,6 @@ fn main() -> io::Result<()> {
 
     let result = run(&mut terminal, &mut collector, &mut app, &mut last);
 
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     result
 }

@@ -21,6 +21,13 @@ pub fn is_alive(pid: u32) -> bool {
     }
 }
 
+/// Pure helper: returns true only if the process is still alive AND still
+/// classifies as Killable. Called before the deferred SIGKILL to guard
+/// against PID reuse — a recycled PID may belong to a protected process.
+pub fn should_sigkill(pid: u32, name: &str) -> bool {
+    is_alive(pid) && classify(name, pid) == Protection::Killable
+}
+
 /// Send SIGTERM; if still alive after 2s, send SIGKILL. Refuses protected pids.
 pub fn kill(pid: u32, name: &str) -> Result<(), KillError> {
     if classify(name, pid) == Protection::Protected {
@@ -36,9 +43,14 @@ pub fn kill(pid: u32, name: &str) -> Result<(), KillError> {
     }
 
     // Escalate in the background so the UI never blocks.
+    // We capture `name` as an owned String so we can re-classify inside the
+    // thread. PIDs can be recycled within the 2-second sleep window: if the
+    // original process exited and a new protected process inherited that PID,
+    // sending SIGKILL without re-checking would violate the protection invariant.
+    let owned_name = name.to_owned();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(2));
-        if is_alive(pid) {
+        if should_sigkill(pid, &owned_name) {
             let _ = nix_kill(target, Signal::SIGKILL);
         }
     });
@@ -52,6 +64,29 @@ mod tests {
     use nix::sys::wait::{waitpid, WaitPidFlag};
     use std::process::Command;
     use std::thread::sleep;
+
+    // --- should_sigkill pure-logic tests ---
+
+    #[test]
+    fn should_sigkill_false_for_protected_name() {
+        // A protected name must never be escalated, regardless of liveness.
+        // We use pid 5000 (well above 100) so the low-pid guard doesn't fire —
+        // only the name-based protection should block it.
+        assert!(!should_sigkill(5000, "launchd"));
+        assert!(!should_sigkill(5000, "kernel_task"));
+    }
+
+    #[test]
+    fn should_sigkill_false_for_dead_pid() {
+        // pid 999_999 is virtually guaranteed to not exist.
+        assert!(!should_sigkill(999_999, "ghost"));
+    }
+
+    #[test]
+    fn should_sigkill_false_for_low_pid_regardless_of_name() {
+        // Pids < 100 are always protected by classify().
+        assert!(!should_sigkill(1, "sleep"));
+    }
 
     fn spawn_sleeper() -> u32 {
         Command::new("sleep")

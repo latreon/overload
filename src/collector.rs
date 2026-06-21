@@ -13,6 +13,12 @@ pub struct Collector {
     total_mem: u64,
 }
 
+impl Default for Collector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collector {
     pub fn new() -> Self {
         let mut sys = System::new_with_specifics(
