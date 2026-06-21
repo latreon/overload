@@ -1,4 +1,4 @@
-use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
 #[derive(Debug, Clone)]
 pub struct ProcRow {
@@ -6,6 +6,19 @@ pub struct ProcRow {
     pub name: String,
     pub cpu_pct: f32,
     pub ram_pct: f32,
+}
+
+/// System-wide summary shown in the header line.
+#[derive(Debug, Clone)]
+pub struct SysStats {
+    /// 1-minute load average.
+    pub load1: f64,
+    /// Global CPU usage across all cores, 0..=100.
+    pub cpu_pct: f32,
+    /// Used memory as a percentage of total, 0..=100.
+    pub mem_pct: f32,
+    /// Number of processes seen in the last snapshot.
+    pub proc_count: usize,
 }
 
 pub struct Collector {
@@ -24,11 +37,26 @@ impl Collector {
         let mut sys = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_memory(MemoryRefreshKind::everything())
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
                 .with_processes(ProcessRefreshKind::everything()),
         );
         sys.refresh_memory();
         let total_mem = sys.total_memory().max(1);
         Collector { sys, total_mem }
+    }
+
+    /// System-wide summary. Global CPU usage is meaningful only after two
+    /// refreshes spaced apart; the 1.5s event loop satisfies that.
+    pub fn system_stats(&mut self) -> SysStats {
+        self.sys.refresh_cpu_usage();
+        self.sys.refresh_memory();
+        let used = self.sys.used_memory();
+        SysStats {
+            load1: System::load_average().one,
+            cpu_pct: self.sys.global_cpu_usage(),
+            mem_pct: (used as f64 / self.total_mem as f64 * 100.0) as f32,
+            proc_count: self.sys.processes().len(),
+        }
     }
 
     pub fn snapshot(&mut self) -> Vec<ProcRow> {
@@ -84,5 +112,19 @@ mod tests {
         for r in &rows {
             assert!(r.ram_pct >= 0.0 && r.ram_pct <= 100.0, "ram% in range");
         }
+    }
+
+    #[test]
+    fn system_stats_returns_sane_values() {
+        let mut c = Collector::new();
+        // Prime CPU deltas, then read again.
+        let _ = c.system_stats();
+        sleep(Duration::from_millis(300));
+        let s = c.system_stats();
+
+        assert!(s.load1 >= 0.0, "load average is non-negative");
+        assert!(s.cpu_pct >= 0.0 && s.cpu_pct <= 100.5, "global cpu% in range");
+        assert!(s.mem_pct >= 0.0 && s.mem_pct <= 100.0, "mem% in range");
+        assert!(s.proc_count > 0, "should see at least one process");
     }
 }
