@@ -57,12 +57,10 @@ impl App {
                 if self.selected + 1 < self.rows.len() {
                     self.selected += 1;
                 }
-                self.status = None;
                 Action::None
             }
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
-                self.status = None;
                 Action::None
             }
             KeyCode::Char('k') => {

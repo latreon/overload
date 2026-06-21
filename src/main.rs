@@ -12,7 +12,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Row, Table};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::io::{self, stdout};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,19 @@ const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
 const RAM_BAR_WIDTH: usize = 4;
 const HELP: &str = " [↑↓] move   [k] kill   [q] quit ";
+
+/// Style the persistent action line by what it reports.
+fn action_style(status: &str) -> Style {
+    let base = if status.contains("killed") {
+        Style::default().fg(Color::Green)
+    } else if status.contains("killing") {
+        Style::default().fg(Color::Yellow)
+    } else {
+        // protected / permission denied / other errors
+        Style::default().fg(Color::Red)
+    };
+    base.add_modifier(Modifier::BOLD)
+}
 
 /// Color a percentage by intensity: green (calm) → yellow → red (hot).
 fn heat(pct: f32) -> Color {
@@ -45,8 +58,34 @@ fn bar(frac: f32, width: usize) -> String {
 fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let area = frame.area();
 
+    // Top: persistent action line, then the system summary, then the table.
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // action / status — always at the top
+        Constraint::Length(1), // system summary
+        Constraint::Min(0),    // process table
+    ])
+    .split(area);
+
+    // Action line — persists after a kill until the next action replaces it.
+    let action = match &app.status {
+        Some(s) => Paragraph::new(format!("  {s}")).style(action_style(s)),
+        None => Paragraph::new("  select a process and press [k] to kill it")
+            .style(Style::default().fg(Color::DarkGray)),
+    };
+    frame.render_widget(action, chunks[0]);
+
+    // System summary line.
+    let summary = Paragraph::new(format!(
+        " overload   load {:.2}   cpu {:.0}%   mem {:.0}%   {} procs",
+        stats.load1, stats.cpu_pct, stats.mem_pct, stats.proc_count
+    ))
+    .style(Style::default().add_modifier(Modifier::BOLD));
+    frame.render_widget(summary, chunks[1]);
+
+    let table_area = chunks[2];
+
     // Pin the selected row near the vertical center; the list scrolls around it.
-    let view_h = (area.height.saturating_sub(3)).max(1) as usize; // borders + header
+    let view_h = (table_area.height.saturating_sub(3)).max(1) as usize; // borders + header
     let len = app.rows.len();
     let offset = if len <= view_h {
         0
@@ -100,12 +139,6 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         })
         .collect();
 
-    let top = format!(
-        " overload   load {:.2}   cpu {:.0}%   mem {:.0}%   {} procs ",
-        stats.load1, stats.cpu_pct, stats.mem_pct, stats.proc_count
-    );
-    let bottom = app.status.clone().unwrap_or_else(|| HELP.to_string());
-
     let widths = [
         Constraint::Length(6),
         Constraint::Length(CPU_BAR_WIDTH as u16 + 5),
@@ -115,11 +148,11 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(top)
-            .title_bottom(bottom),
+            .title(" processes — sorted by CPU ")
+            .title_bottom(HELP),
     );
 
-    frame.render_widget(table, area);
+    frame.render_widget(table, table_area);
 }
 
 /// RAII guard that restores the terminal on every exit path — including panics.
