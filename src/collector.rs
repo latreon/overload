@@ -6,6 +6,9 @@ pub struct ProcRow {
     pub name: String,
     pub cpu_pct: f32,
     pub ram_pct: f32,
+    /// Listening TCP ports for this pid (filled in by the caller via the
+    /// `ports` module; empty when not collected).
+    pub ports: Vec<u16>,
 }
 
 /// System-wide summary shown in the header line.
@@ -72,6 +75,7 @@ impl Collector {
                 name: p.name().to_string_lossy().to_string(),
                 cpu_pct: p.cpu_usage(),
                 ram_pct: (p.memory() as f64 / self.total_mem as f64 * 100.0) as f32,
+                ports: Vec::new(),
             })
             .collect();
 

@@ -1,6 +1,7 @@
 mod classifier;
 mod collector;
 mod killer;
+mod ports;
 mod ui;
 
 use crate::collector::{Collector, SysStats};
@@ -126,10 +127,21 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             } else {
                 format!("{:>5}", d.pids[0])
             };
-            let name = if d.protected {
-                format!("{} · protected", d.label)
+            let ports = if d.ports.is_empty() {
+                String::new()
             } else {
-                d.label.clone()
+                let list = d
+                    .ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" :");
+                format!("  :{list}")
+            };
+            let name = if d.protected {
+                format!("{}{ports} · protected", d.label)
+            } else {
+                format!("{}{ports}", d.label)
             };
 
             let cpu_txt = format!("{} {:>3.0}", bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH), d.cpu_pct);
@@ -191,7 +203,116 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Parsed command line. With no recognized flag, launches the TUI.
+#[derive(Debug, PartialEq, Eq)]
+enum Cmd {
+    Tui,
+    Help,
+    Port(u16),
+    KillPort(u16),
+    Error(String),
+}
+
+fn parse_args(args: &[String]) -> Cmd {
+    match args.first().map(String::as_str) {
+        None => Cmd::Tui,
+        Some("-h") | Some("--help") => Cmd::Help,
+        Some("--port") | Some("--kill-port") => {
+            let flag = &args[0];
+            let Some(raw) = args.get(1) else {
+                return Cmd::Error(format!("{flag} needs a port number"));
+            };
+            match raw.parse::<u16>() {
+                Ok(p) if p > 0 => {
+                    if flag == "--port" {
+                        Cmd::Port(p)
+                    } else {
+                        Cmd::KillPort(p)
+                    }
+                }
+                _ => Cmd::Error(format!("invalid port: {raw}")),
+            }
+        }
+        Some(other) => Cmd::Error(format!("unknown argument: {other}")),
+    }
+}
+
+const USAGE: &str = "overload — find and kill resource-hungry processes
+
+USAGE:
+    overload                 Launch the interactive TUI
+    overload --port <N>      Show what is listening on TCP port N
+    overload --kill-port <N> Kill whatever is listening on TCP port N
+    overload --help          Show this help
+
+TUI KEYS:
+    j / ↑ ↓   move      g / G   top / bottom     / filter
+    c m n     sort      t       group helpers    k kill   q quit";
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match parse_args(&args) {
+        Cmd::Help => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Cmd::Port(p) => {
+            cmd_port(p);
+            Ok(())
+        }
+        Cmd::KillPort(p) => {
+            cmd_kill_port(p);
+            Ok(())
+        }
+        Cmd::Error(msg) => {
+            eprintln!("overload: {msg}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+        Cmd::Tui => run_tui(),
+    }
+}
+
+/// `--port N`: print the processes listening on a port.
+fn cmd_port(port: u16) {
+    let listeners = ports::on_port(port);
+    if listeners.is_empty() {
+        println!("nothing is listening on port {port}");
+        return;
+    }
+    println!("port {port}:");
+    for l in listeners {
+        println!("  {:>7}  {}", l.pid, l.command);
+    }
+}
+
+/// `--kill-port N`: kill whatever is listening on a port.
+fn cmd_kill_port(port: u16) {
+    let listeners = ports::on_port(port);
+    if listeners.is_empty() {
+        println!("nothing is listening on port {port}");
+        return;
+    }
+    for l in listeners {
+        match killer::kill(l.pid, &l.command) {
+            Ok(()) => println!("killed {} ({}) on port {port}", l.command, l.pid),
+            Err(e) => println!("could not kill {} ({}): {e:?}", l.command, l.pid),
+        }
+    }
+}
+
+/// Take a process snapshot and annotate each row with its listening ports.
+fn snapshot_with_ports(collector: &mut Collector) -> Vec<collector::ProcRow> {
+    let mut rows = collector.snapshot();
+    let port_map = ports::ports_by_pid();
+    for r in &mut rows {
+        if let Some(p) = port_map.get(&r.pid) {
+            r.ports = p.clone();
+        }
+    }
+    rows
+}
+
+fn run_tui() -> io::Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen)?;
@@ -211,7 +332,7 @@ fn main() -> io::Result<()> {
     let _ = collector.snapshot();
     let _ = collector.system_stats();
     std::thread::sleep(Duration::from_millis(250));
-    app.set_rows(collector.snapshot());
+    app.set_rows(snapshot_with_ports(&mut collector));
     let mut stats = collector.system_stats();
     let mut last = Instant::now();
 
@@ -260,7 +381,7 @@ fn run<B: Backend>(
 
         if last.elapsed() >= REFRESH {
             // set_rows rebuilds the view and keeps the cursor on the same row.
-            app.set_rows(collector.snapshot());
+            app.set_rows(snapshot_with_ports(collector));
             *stats = collector.system_stats();
             *last = Instant::now();
         }
@@ -278,7 +399,7 @@ mod tests {
     }
 
     fn proc(pid: u32, name: &str, cpu: f32, ram: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram }
+        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram, ports: vec![] }
     }
 
     fn rendered_text(app: &App, w: u16, h: u16) -> String {
@@ -292,6 +413,37 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_maps_flags() {
+        assert_eq!(parse_args(&args(&[])), Cmd::Tui);
+        assert_eq!(parse_args(&args(&["--help"])), Cmd::Help);
+        assert_eq!(parse_args(&args(&["-h"])), Cmd::Help);
+        assert_eq!(parse_args(&args(&["--port", "3000"])), Cmd::Port(3000));
+        assert_eq!(parse_args(&args(&["--kill-port", "8080"])), Cmd::KillPort(8080));
+    }
+
+    #[test]
+    fn parse_args_reports_errors() {
+        assert!(matches!(parse_args(&args(&["--port"])), Cmd::Error(_)));
+        assert!(matches!(parse_args(&args(&["--port", "0"])), Cmd::Error(_)));
+        assert!(matches!(parse_args(&args(&["--port", "notnum"])), Cmd::Error(_)));
+        assert!(matches!(parse_args(&args(&["--bogus"])), Cmd::Error(_)));
+    }
+
+    #[test]
+    fn render_shows_listening_port() {
+        let mut app = App::new();
+        let mut p = proc(8981, "node", 30.0, 1.0);
+        p.ports = vec![3000];
+        app.set_rows(vec![p]);
+        let text = rendered_text(&app, 80, 8);
+        assert!(text.contains(":3000"), "listening port should be shown");
     }
 
     #[test]
