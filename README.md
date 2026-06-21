@@ -5,7 +5,10 @@ A macOS terminal tool to find and kill resource hogs fast.
 ## Usage
 
 ```
-overload
+overload                 # launch the interactive TUI
+overload --port 3000     # show what is listening on TCP port 3000
+overload --kill-port 3000  # kill whatever is listening on port 3000
+overload --help          # usage
 ```
 
 - `j` / `↑` `↓` — move selection
@@ -21,6 +24,10 @@ overload
 group. Press `t` to switch to a flat per-process view. Command-line tools
 (node, python, …) stay as individual rows.
 
+**Ports.** Processes listening on a TCP port show it inline (`node  :3000`).
+From the command line, `overload --port 3000` lists what holds a port and
+`overload --kill-port 3000` frees it — the cure for `EADDRINUSE`.
+
 **Layout.** A persistent action line sits at the very top: it shows `killing…`
 after you press `k` and flips to `✓ killed` once the process is gone, staying
 visible until your next action. Below it, a summary line shows load average,
@@ -34,7 +41,19 @@ greyed and cannot be killed.
 
 ## Install
 
+### Homebrew
+
 ```
-cargo build --release
-mv target/release/overload /usr/local/bin/
+brew install latreon/tap/overload
+```
+
+(or install the formula directly:
+`brew install https://raw.githubusercontent.com/latreon/overload/main/Formula/overload.rb`)
+
+### From source
+
+```
+cargo install --path .
+# or:
+cargo build --release && mv target/release/overload /usr/local/bin/
 ```

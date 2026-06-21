@@ -39,6 +39,8 @@ pub struct DisplayRow {
     pub pids: Vec<u32>,
     pub count: usize,
     pub protected: bool,
+    /// Listening TCP ports (union across the group's members), sorted.
+    pub ports: Vec<u16>,
 }
 
 /// Collapse a process name to its app group by trimming helper/parenthetical
@@ -136,14 +138,24 @@ impl App {
                     pids: Vec::new(),
                     count: 0,
                     protected: false,
+                    ports: Vec::new(),
                 });
                 entry.cpu_pct += r.cpu_pct;
                 entry.ram_pct += r.ram_pct;
                 entry.pids.push(r.pid);
                 entry.count += 1;
                 entry.protected = entry.protected || protected;
+                for &p in &r.ports {
+                    if !entry.ports.contains(&p) {
+                        entry.ports.push(p);
+                    }
+                }
             }
-            map.into_values().collect()
+            let mut rows: Vec<DisplayRow> = map.into_values().collect();
+            for row in &mut rows {
+                row.ports.sort_unstable();
+            }
+            rows
         } else {
             filtered
                 .map(|r| DisplayRow {
@@ -154,6 +166,7 @@ impl App {
                     pids: vec![r.pid],
                     count: 1,
                     protected: classify(&r.name, r.pid) == Protection::Protected,
+                    ports: r.ports.clone(),
                 })
                 .collect()
         };
@@ -285,11 +298,11 @@ mod tests {
     use super::*;
 
     fn row(pid: u32, name: &str, cpu: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: 0.0 }
+        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: 0.0, ports: vec![] }
     }
 
     fn rowm(pid: u32, name: &str, cpu: f32, ram: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram }
+        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram, ports: vec![] }
     }
 
     fn app_with(rows: Vec<ProcRow>) -> App {
@@ -391,6 +404,18 @@ mod tests {
             }
             other => panic!("expected Kill, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn grouped_row_unions_member_ports() {
+        let mut r1 = rowm(1001, "node Helper (a)", 10.0, 0.0);
+        r1.ports = vec![3000];
+        let mut r2 = rowm(1002, "node Helper (b)", 5.0, 0.0);
+        r2.ports = vec![8080, 3000];
+        let mut a = App::new();
+        a.set_rows(vec![r1, r2]);
+        let node = a.display.iter().find(|d| d.label == "node").unwrap();
+        assert_eq!(node.ports, vec![3000, 8080], "ports unioned and sorted");
     }
 
     #[test]
