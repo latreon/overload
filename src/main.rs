@@ -203,8 +203,16 @@ fn main() -> io::Result<()> {
 
     let mut collector = Collector::new();
     let mut app = App::new();
-    app.set_rows(collector.snapshot()); // prime
-    let mut stats = collector.system_stats(); // prime
+
+    // sysinfo reports 0% CPU on the first read (it needs two samples spaced
+    // apart to compute deltas). Prime once, wait a beat, then take the real
+    // snapshot so the first frame is correctly sorted with the cursor on the
+    // hottest process — no need to scroll up after launch.
+    let _ = collector.snapshot();
+    let _ = collector.system_stats();
+    std::thread::sleep(Duration::from_millis(250));
+    app.set_rows(collector.snapshot());
+    let mut stats = collector.system_stats();
     let mut last = Instant::now();
 
     let result = run(&mut terminal, &mut collector, &mut app, &mut stats, &mut last);
