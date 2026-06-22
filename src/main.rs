@@ -12,15 +12,19 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
+use std::collections::VecDeque;
 use std::io::{self, stdout};
 use std::time::{Duration, Instant};
 
 const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
 const RAM_BAR_WIDTH: usize = 4;
-const HELP: &str =
-    " j/↑↓ move · g/G ends · / filter · c/m/n sort · t group · k kill · q quit ";
+const SPARK_WIDTH: usize = 12;
+const HELP: &str = " j/↑↓ move · / filter · c/m/n sort · t group · space mark · k kill · q quit ";
+
+/// Levels for sparkline / bar glyphs, low → high.
+const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Style the persistent action line by what it reports.
 fn action_style(status: &str) -> Style {
@@ -35,14 +39,17 @@ fn action_style(status: &str) -> Style {
     base.add_modifier(Modifier::BOLD)
 }
 
-/// Color a percentage by intensity: green (calm) → yellow → red (hot).
-fn heat(pct: f32) -> Color {
-    if pct >= 70.0 {
-        Color::Red
-    } else if pct >= 30.0 {
-        Color::Yellow
+/// Smooth green→yellow→red gradient for a 0..=100 percentage.
+fn gradient(pct: f32) -> Color {
+    let t = (pct / 100.0).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32, u: f32| (a + (b - a) * u) as u8;
+    // green (46,204,113) → yellow (241,196,15) → red (231,76,60)
+    if t < 0.5 {
+        let u = t * 2.0;
+        Color::Rgb(lerp(46.0, 241.0, u), lerp(204.0, 196.0, u), lerp(113.0, 15.0, u))
     } else {
-        Color::Green
+        let u = (t - 0.5) * 2.0;
+        Color::Rgb(lerp(241.0, 231.0, u), lerp(196.0, 76.0, u), lerp(15.0, 60.0, u))
     }
 }
 
@@ -56,12 +63,29 @@ fn bar(frac: f32, width: usize) -> String {
     s
 }
 
+/// Render the last `width` CPU samples as a block sparkline (scaled to one
+/// full core = 100%). Left-padded with spaces when there are fewer samples.
+fn spark(samples: &VecDeque<f32>, width: usize) -> String {
+    let mut s = String::with_capacity(width);
+    let n = samples.len();
+    let start = n.saturating_sub(width);
+    for _ in 0..width.saturating_sub(n) {
+        s.push(' ');
+    }
+    for v in samples.iter().skip(start) {
+        let lvl = ((v / 100.0).clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f32).round() as usize;
+        s.push(BLOCKS[lvl]);
+    }
+    s
+}
+
 fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let area = frame.area();
 
-    // Top: persistent action line, then the system summary, then the table.
+    // Top: action line, gauge bar, summary line, then the table.
     let chunks = Layout::vertical([
-        Constraint::Length(1), // action / status — always at the top
+        Constraint::Length(1), // action / status
+        Constraint::Length(1), // CPU/MEM gauges + CPU history sparkline
         Constraint::Length(1), // system summary
         Constraint::Min(0),    // process table
     ])
@@ -81,6 +105,21 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     };
     frame.render_widget(action, chunks[0]);
 
+    // Gauge bar: colored CPU and MEM meters + a sparkline of recent CPU.
+    let gauges = Line::from(vec![
+        Span::raw(" CPU "),
+        Span::styled(bar(stats.cpu_pct / 100.0, 10), Style::default().fg(gradient(stats.cpu_pct))),
+        Span::raw(format!(" {:>3.0}%   ", stats.cpu_pct)),
+        Span::raw("MEM "),
+        Span::styled(bar(stats.mem_pct / 100.0, 10), Style::default().fg(gradient(stats.mem_pct))),
+        Span::raw(format!(" {:>3.0}%   ", stats.mem_pct)),
+        Span::styled(
+            spark(&app.cpu_history, SPARK_WIDTH),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(gauges), chunks[1]);
+
     // System summary line, including current view mode.
     let filter_part = if app.filter.is_empty() {
         String::new()
@@ -88,19 +127,17 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         format!("   /{}", app.filter)
     };
     let summary = Paragraph::new(format!(
-        " overload   load {:.2}   cpu {:.0}%   mem {:.0}%   {} procs   ·   sort:{}   group:{}{}",
+        " overload   load {:.2}   {} procs   ·   sort:{}   group:{}{}",
         stats.load1,
-        stats.cpu_pct,
-        stats.mem_pct,
         stats.proc_count,
         app.sort.label(),
         if app.grouped { "on" } else { "off" },
         filter_part,
     ))
     .style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(summary, chunks[1]);
+    frame.render_widget(summary, chunks[2]);
 
-    let table_area = chunks[2];
+    let table_area = chunks[3];
 
     // Pin the selected row near the vertical center; the list scrolls around it.
     let view_h = (table_area.height.saturating_sub(3)).max(1) as usize; // borders + header
@@ -112,7 +149,7 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     };
     let end = (offset + view_h).min(len);
 
-    let header = Row::new(vec!["PID", "CPU", "RAM", "NAME"])
+    let header = Row::new(vec![" ", "PID", "CPU", "RAM", "TREND", "NAME"])
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     let rows: Vec<Row> = app.display[offset..end]
@@ -120,8 +157,18 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         .enumerate()
         .map(|(vi, d)| {
             let idx = offset + vi;
+            let marked = app.marked.contains(&d.key);
 
-            // First column: pid for a single process, or ×N for a group.
+            // Gutter marker: ● marked, ▸ selected, else blank.
+            let marker = if marked {
+                "●"
+            } else if idx == app.selected {
+                "▸"
+            } else {
+                " "
+            };
+
+            // pid for a single process, or ×N for a group.
             let id = if d.count > 1 {
                 format!("×{:<4}", d.count)
             } else {
@@ -146,28 +193,48 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
 
             let cpu_txt = format!("{} {:>3.0}", bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH), d.cpu_pct);
             let ram_txt = format!("{} {:>4.1}", bar(d.ram_pct / 100.0, RAM_BAR_WIDTH), d.ram_pct);
+            let trend = app
+                .history
+                .get(&d.key)
+                .map(|h| spark(h, SPARK_WIDTH))
+                .unwrap_or_default();
 
-            let (cpu_cell, ram_cell, name_cell) = if d.protected {
+            let (cpu_cell, ram_cell, trend_cell, name_cell) = if d.protected {
                 let grey = Style::default().fg(Color::DarkGray);
                 (
                     Cell::from(cpu_txt).style(grey),
                     Cell::from(ram_txt).style(grey),
+                    Cell::from(trend).style(grey),
                     Cell::from(name).style(grey),
                 )
             } else {
                 (
-                    Cell::from(cpu_txt).style(Style::default().fg(heat(d.cpu_pct))),
-                    Cell::from(ram_txt).style(Style::default().fg(heat(d.ram_pct))),
+                    Cell::from(cpu_txt).style(Style::default().fg(gradient(d.cpu_pct))),
+                    Cell::from(ram_txt).style(Style::default().fg(gradient(d.ram_pct))),
+                    Cell::from(trend).style(Style::default().fg(Color::Cyan)),
                     Cell::from(name),
                 )
             };
 
-            let mut row = Row::new(vec![Cell::from(id), cpu_cell, ram_cell, name_cell]);
+            let marker_cell =
+                Cell::from(marker).style(Style::default().fg(if marked {
+                    Color::Cyan
+                } else {
+                    Color::Blue
+                }));
+
+            let mut row = Row::new(vec![
+                marker_cell,
+                Cell::from(id),
+                cpu_cell,
+                ram_cell,
+                trend_cell,
+                name_cell,
+            ]);
             if idx == app.selected {
                 row = row.style(
                     Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
+                        .bg(Color::Indexed(238))
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -176,15 +243,24 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         .collect();
 
     let widths = [
+        Constraint::Length(1),
         Constraint::Length(6),
         Constraint::Length(CPU_BAR_WIDTH as u16 + 5),
         Constraint::Length(RAM_BAR_WIDTH as u16 + 6),
+        Constraint::Length(SPARK_WIDTH as u16),
         Constraint::Min(8),
     ];
+    let marks = app.marked.len();
+    let title = if marks > 0 {
+        format!(" processes — {marks} marked ")
+    } else {
+        " processes ".to_string()
+    };
     let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" processes ")
+            .border_type(BorderType::Rounded)
+            .title(title)
             .title_bottom(HELP),
     );
 
@@ -334,6 +410,7 @@ fn run_tui() -> io::Result<()> {
     std::thread::sleep(Duration::from_millis(250));
     app.set_rows(snapshot_with_ports(&mut collector));
     let mut stats = collector.system_stats();
+    app.record_cpu(stats.cpu_pct);
     let mut last = Instant::now();
 
     let result = run(&mut terminal, &mut collector, &mut app, &mut stats, &mut last);
@@ -383,6 +460,7 @@ fn run<B: Backend>(
             // set_rows rebuilds the view and keeps the cursor on the same row.
             app.set_rows(snapshot_with_ports(collector));
             *stats = collector.system_stats();
+            app.record_cpu(stats.cpu_pct);
             *last = Instant::now();
         }
     }
@@ -437,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn render_shows_trend_column_and_mark() {
+        let mut app = App::new();
+        app.set_rows(vec![proc(8981, "python", 10.0, 1.0)]);
+        let key = app.display[0].key.clone();
+        app.marked.insert(key);
+        let text = rendered_text(&app, 80, 9);
+        assert!(text.contains("TREND"), "trend column header missing");
+        assert!(text.contains('●'), "marked-row bullet missing");
+    }
+
+    #[test]
     fn render_shows_listening_port() {
         let mut app = App::new();
         let mut p = proc(8981, "node", 30.0, 1.0);
@@ -455,10 +544,23 @@ mod tests {
     }
 
     #[test]
-    fn heat_escalates_with_intensity() {
-        assert_eq!(heat(10.0), Color::Green);
-        assert_eq!(heat(50.0), Color::Yellow);
-        assert_eq!(heat(95.0), Color::Red);
+    fn gradient_runs_green_to_red() {
+        // Endpoints land on the defined anchor colors; midpoint is yellow-ish.
+        assert_eq!(gradient(0.0), Color::Rgb(46, 204, 113));
+        assert_eq!(gradient(100.0), Color::Rgb(231, 76, 60));
+        assert_eq!(gradient(50.0), Color::Rgb(241, 196, 15));
+    }
+
+    #[test]
+    fn spark_scales_and_left_pads() {
+        let mut h = VecDeque::new();
+        h.push_back(0.0);
+        h.push_back(100.0);
+        let s = spark(&h, 4);
+        // 4 wide, 2 samples → 2 leading spaces, then lowest + highest block.
+        assert_eq!(s.chars().count(), 4);
+        assert!(s.starts_with("  "), "left-padded: {s:?}");
+        assert!(s.ends_with('█'), "100% → full block: {s:?}");
     }
 
     #[test]
