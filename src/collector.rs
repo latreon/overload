@@ -127,7 +127,10 @@ mod tests {
         let s = c.system_stats();
 
         assert!(s.load1 >= 0.0, "load average is non-negative");
-        assert!(s.cpu_pct >= 0.0 && s.cpu_pct <= 100.5, "global cpu% in range");
+        assert!(
+            s.cpu_pct >= 0.0 && s.cpu_pct <= 100.5,
+            "global cpu% in range"
+        );
         assert!(s.mem_pct >= 0.0 && s.mem_pct <= 100.0, "mem% in range");
         assert!(s.proc_count > 0, "should see at least one process");
     }

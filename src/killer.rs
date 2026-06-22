@@ -13,8 +13,12 @@ pub enum KillError {
 
 /// Returns true if the process exists (including as a zombie).
 pub fn is_alive(pid: u32) -> bool {
+    // A pid that doesn't fit in i32 can't name a real process here.
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
     // Signal 0 performs error checking without sending a signal.
-    match nix_kill(Pid::from_raw(pid as i32), None) {
+    match nix_kill(Pid::from_raw(raw), None) {
         Ok(()) => true,
         Err(nix::errno::Errno::EPERM) => true, // exists, but not ours
         Err(_) => false,
@@ -34,7 +38,8 @@ pub fn kill(pid: u32, name: &str) -> Result<(), KillError> {
         return Err(KillError::Protected);
     }
 
-    let target = Pid::from_raw(pid as i32);
+    let raw = i32::try_from(pid).map_err(|_| KillError::Other)?;
+    let target = Pid::from_raw(raw);
     match nix_kill(target, Signal::SIGTERM) {
         Ok(()) => {}
         Err(nix::errno::Errno::ESRCH) => return Err(KillError::NotFound),

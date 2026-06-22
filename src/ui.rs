@@ -107,11 +107,12 @@ impl App {
 
     /// Record kills; status shows "killing…" until every pid disappears.
     pub fn register_kill(&mut self, pids: Vec<u32>, label: String) {
-        self.status = Some(if pids.len() > 1 {
-            format!("killing {label} ({} procs)…", pids.len())
-        } else {
-            format!("killing {label} ({})…", pids[0])
-        });
+        let detail = match pids.as_slice() {
+            [] => return,
+            [single] => single.to_string(),
+            many => format!("{} procs", many.len()),
+        };
+        self.status = Some(format!("killing {label} ({detail})…"));
         self.pending.push((pids, label));
     }
 
@@ -119,8 +120,7 @@ impl App {
         self.raw = rows;
 
         // Resolve pending kills against the processes still present.
-        let present: std::collections::HashSet<u32> =
-            self.raw.iter().map(|r| r.pid).collect();
+        let present: std::collections::HashSet<u32> = self.raw.iter().map(|r| r.pid).collect();
         let pending = std::mem::take(&mut self.pending);
         for (pids, label) in pending {
             let alive: Vec<u32> = pids.into_iter().filter(|p| present.contains(p)).collect();
@@ -209,10 +209,14 @@ impl App {
 
         match self.sort {
             Sort::Cpu => display.sort_by(|a, b| {
-                b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal)
+                b.cpu_pct
+                    .partial_cmp(&a.cpu_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }),
             Sort::Ram => display.sort_by(|a, b| {
-                b.ram_pct.partial_cmp(&a.ram_pct).unwrap_or(std::cmp::Ordering::Equal)
+                b.ram_pct
+                    .partial_cmp(&a.ram_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }),
             Sort::Name => {
                 display.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
@@ -381,11 +385,23 @@ mod tests {
     use super::*;
 
     fn row(pid: u32, name: &str, cpu: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: 0.0, ports: vec![] }
+        ProcRow {
+            pid,
+            name: name.to_string(),
+            cpu_pct: cpu,
+            ram_pct: 0.0,
+            ports: vec![],
+        }
     }
 
     fn rowm(pid: u32, name: &str, cpu: f32, ram: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram, ports: vec![] }
+        ProcRow {
+            pid,
+            name: name.to_string(),
+            cpu_pct: cpu,
+            ram_pct: ram,
+            ports: vec![],
+        }
     }
 
     fn app_with(rows: Vec<ProcRow>) -> App {
@@ -412,9 +428,16 @@ mod tests {
     fn fresh_app_starts_selected_on_top_row() {
         // First populated snapshot must leave the cursor on row 0 (the hottest),
         // not somewhere in the middle.
-        let a = app_with(vec![row(1, "low", 5.0), row(2, "hot", 90.0), row(3, "mid", 40.0)]);
+        let a = app_with(vec![
+            row(1, "low", 5.0),
+            row(2, "hot", 90.0),
+            row(3, "mid", 40.0),
+        ]);
         assert_eq!(a.selected, 0);
-        assert_eq!(a.display[0].label, "hot", "row 0 is the highest-CPU process");
+        assert_eq!(
+            a.display[0].label, "hot",
+            "row 0 is the highest-CPU process"
+        );
     }
 
     #[test]
@@ -463,12 +486,19 @@ mod tests {
             row(3, "python", 50.0),
         ]);
         // grouped is on by default: the two Chrome helpers collapse to one row.
-        let chrome = a.display.iter().find(|d| d.label == "Google Chrome").unwrap();
+        let chrome = a
+            .display
+            .iter()
+            .find(|d| d.label == "Google Chrome")
+            .unwrap();
         assert_eq!(chrome.count, 2);
         assert_eq!(chrome.cpu_pct, 15.0);
         assert_eq!(chrome.pids.len(), 2);
         // python stays its own row.
-        assert!(a.display.iter().any(|d| d.label == "python" && d.count == 1));
+        assert!(a
+            .display
+            .iter()
+            .any(|d| d.label == "python" && d.count == 1));
     }
 
     #[test]
@@ -546,7 +576,10 @@ mod tests {
 
     #[test]
     fn register_kill_keeps_killing_while_any_pid_present() {
-        let mut a = app_with(vec![row(1, "Chrome Helper", 10.0), row(2, "Chrome Helper", 5.0)]);
+        let mut a = app_with(vec![
+            row(1, "Chrome Helper", 10.0),
+            row(2, "Chrome Helper", 5.0),
+        ]);
         a.register_kill(vec![1, 2], "Chrome".to_string());
         // Only pid 1 died; pid 2 still alive → still killing.
         a.set_rows(vec![row(2, "Chrome Helper", 5.0)]);
@@ -608,7 +641,11 @@ mod tests {
         a.handle_key(KeyCode::Char(' ')); // mark one
         assert_eq!(a.handle_key(KeyCode::Esc), Action::None, "esc clears marks");
         assert!(a.marked.is_empty());
-        assert_eq!(a.handle_key(KeyCode::Esc), Action::Quit, "esc quits when idle");
+        assert_eq!(
+            a.handle_key(KeyCode::Esc),
+            Action::Quit,
+            "esc quits when idle"
+        );
     }
 
     #[test]

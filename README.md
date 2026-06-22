@@ -46,8 +46,18 @@ state. Each row has a heat-colored CPU/RAM meter (green → yellow → red), and
 selected row stays pinned near the center so it doesn't jump as the list
 re-sorts. The list is always sorted highest-first by the active sort key.
 
-System-critical processes (WindowServer, kernel_task, launchd, …) are shown
-greyed and cannot be killed.
+System-critical processes (WindowServer, kernel_task, launchd, securityd,
+opendirectoryd, …) are shown greyed and cannot be killed — neither by SIGTERM
+nor by the escalated SIGKILL. PIDs below 100 are protected too, and a recycled
+PID is re-checked before the delayed SIGKILL so a reused slot can't be hit by
+mistake.
+
+## Requirements
+
+- macOS (uses BSD signals and `/usr/sbin/lsof`).
+- Port discovery shells out to `lsof`; it runs with a hard timeout so an
+  unresponsive `lsof` (stale NFS/FUSE mount, slow resolution) can never freeze
+  the UI — ports simply go unshown for that tick.
 
 ## Install
 

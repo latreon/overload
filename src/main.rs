@@ -46,10 +46,18 @@ fn gradient(pct: f32) -> Color {
     // green (46,204,113) → yellow (241,196,15) → red (231,76,60)
     if t < 0.5 {
         let u = t * 2.0;
-        Color::Rgb(lerp(46.0, 241.0, u), lerp(204.0, 196.0, u), lerp(113.0, 15.0, u))
+        Color::Rgb(
+            lerp(46.0, 241.0, u),
+            lerp(204.0, 196.0, u),
+            lerp(113.0, 15.0, u),
+        )
     } else {
         let u = (t - 0.5) * 2.0;
-        Color::Rgb(lerp(241.0, 231.0, u), lerp(196.0, 76.0, u), lerp(15.0, 60.0, u))
+        Color::Rgb(
+            lerp(241.0, 231.0, u),
+            lerp(196.0, 76.0, u),
+            lerp(15.0, 60.0, u),
+        )
     }
 }
 
@@ -94,8 +102,11 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     // Action line. While typing a filter it shows the live query; otherwise
     // it persists the last action (killing…/✓ killed/errors) or a hint.
     let action = if app.filtering {
-        Paragraph::new(format!("  /{}\u{2588}", app.filter))
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Paragraph::new(format!("  /{}\u{2588}", app.filter)).style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         match &app.status {
             Some(s) => Paragraph::new(format!("  {s}")).style(action_style(s)),
@@ -108,10 +119,16 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     // Gauge bar: colored CPU and MEM meters + a sparkline of recent CPU.
     let gauges = Line::from(vec![
         Span::raw(" CPU "),
-        Span::styled(bar(stats.cpu_pct / 100.0, 10), Style::default().fg(gradient(stats.cpu_pct))),
+        Span::styled(
+            bar(stats.cpu_pct / 100.0, 10),
+            Style::default().fg(gradient(stats.cpu_pct)),
+        ),
         Span::raw(format!(" {:>3.0}%   ", stats.cpu_pct)),
         Span::raw("MEM "),
-        Span::styled(bar(stats.mem_pct / 100.0, 10), Style::default().fg(gradient(stats.mem_pct))),
+        Span::styled(
+            bar(stats.mem_pct / 100.0, 10),
+            Style::default().fg(gradient(stats.mem_pct)),
+        ),
         Span::raw(format!(" {:>3.0}%   ", stats.mem_pct)),
         Span::styled(
             spark(&app.cpu_history, SPARK_WIDTH),
@@ -172,7 +189,7 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             let id = if d.count > 1 {
                 format!("×{:<4}", d.count)
             } else {
-                format!("{:>5}", d.pids[0])
+                format!("{:>5}", d.pids.first().copied().unwrap_or(0))
             };
             let ports = if d.ports.is_empty() {
                 String::new()
@@ -191,8 +208,16 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
                 format!("{}{ports}", d.label)
             };
 
-            let cpu_txt = format!("{} {:>3.0}", bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH), d.cpu_pct);
-            let ram_txt = format!("{} {:>4.1}", bar(d.ram_pct / 100.0, RAM_BAR_WIDTH), d.ram_pct);
+            let cpu_txt = format!(
+                "{} {:>3.0}",
+                bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH),
+                d.cpu_pct
+            );
+            let ram_txt = format!(
+                "{} {:>4.1}",
+                bar(d.ram_pct / 100.0, RAM_BAR_WIDTH),
+                d.ram_pct
+            );
             let trend = app
                 .history
                 .get(&d.key)
@@ -216,12 +241,11 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
                 )
             };
 
-            let marker_cell =
-                Cell::from(marker).style(Style::default().fg(if marked {
-                    Color::Cyan
-                } else {
-                    Color::Blue
-                }));
+            let marker_cell = Cell::from(marker).style(Style::default().fg(if marked {
+                Color::Cyan
+            } else {
+                Color::Blue
+            }));
 
             let mut row = Row::new(vec![
                 marker_cell,
@@ -413,7 +437,13 @@ fn run_tui() -> io::Result<()> {
     app.record_cpu(stats.cpu_pct);
     let mut last = Instant::now();
 
-    let result = run(&mut terminal, &mut collector, &mut app, &mut stats, &mut last);
+    let result = run(
+        &mut terminal,
+        &mut collector,
+        &mut app,
+        &mut stats,
+        &mut last,
+    );
 
     let _ = terminal.show_cursor();
     result
@@ -473,11 +503,22 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     fn sample_stats() -> SysStats {
-        SysStats { load1: 5.2, cpu_pct: 78.0, mem_pct: 61.0, proc_count: 3 }
+        SysStats {
+            load1: 5.2,
+            cpu_pct: 78.0,
+            mem_pct: 61.0,
+            proc_count: 3,
+        }
     }
 
     fn proc(pid: u32, name: &str, cpu: f32, ram: f32) -> ProcRow {
-        ProcRow { pid, name: name.to_string(), cpu_pct: cpu, ram_pct: ram, ports: vec![] }
+        ProcRow {
+            pid,
+            name: name.to_string(),
+            cpu_pct: cpu,
+            ram_pct: ram,
+            ports: vec![],
+        }
     }
 
     fn rendered_text(app: &App, w: u16, h: u16) -> String {
@@ -503,14 +544,20 @@ mod tests {
         assert_eq!(parse_args(&args(&["--help"])), Cmd::Help);
         assert_eq!(parse_args(&args(&["-h"])), Cmd::Help);
         assert_eq!(parse_args(&args(&["--port", "3000"])), Cmd::Port(3000));
-        assert_eq!(parse_args(&args(&["--kill-port", "8080"])), Cmd::KillPort(8080));
+        assert_eq!(
+            parse_args(&args(&["--kill-port", "8080"])),
+            Cmd::KillPort(8080)
+        );
     }
 
     #[test]
     fn parse_args_reports_errors() {
         assert!(matches!(parse_args(&args(&["--port"])), Cmd::Error(_)));
         assert!(matches!(parse_args(&args(&["--port", "0"])), Cmd::Error(_)));
-        assert!(matches!(parse_args(&args(&["--port", "notnum"])), Cmd::Error(_)));
+        assert!(matches!(
+            parse_args(&args(&["--port", "notnum"])),
+            Cmd::Error(_)
+        ));
         assert!(matches!(parse_args(&args(&["--bogus"])), Cmd::Error(_)));
     }
 
