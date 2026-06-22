@@ -4,6 +4,9 @@ pub enum Protection {
     Protected,
 }
 
+/// Names of macOS system processes that must never be killed: doing so
+/// crashes the session, the login screen, audio, Spotlight, the keychain, or
+/// directory/security services. Matched exactly against the process name.
 const PROTECTED_NAMES: &[&str] = &[
     "WindowServer",
     "kernel_task",
@@ -13,6 +16,16 @@ const PROTECTED_NAMES: &[&str] = &[
     "coreaudiod",
     "mds",
     "mds_stores",
+    "cfprefsd",
+    "opendirectoryd",
+    "securityd",
+    "syspolicyd",
+    "trustd",
+    "notifyd",
+    "distnoted",
+    "configd",
+    "powerd",
+    "UserEventAgent",
 ];
 
 pub fn classify(name: &str, pid: u32) -> Protection {
@@ -54,7 +67,10 @@ mod tests {
     #[test]
     fn allows_normal_user_process() {
         assert_eq!(classify("python", 8981), Protection::Killable);
-        assert_eq!(classify("Google Chrome for Testing", 8360), Protection::Killable);
+        assert_eq!(
+            classify("Google Chrome for Testing", 8360),
+            Protection::Killable
+        );
     }
 
     #[test]

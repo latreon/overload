@@ -5,6 +5,18 @@
 
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Absolute path to `lsof` on macOS. Hardcoded (rather than resolved via
+/// `PATH`) so a poisoned `PATH` can't trick us into running a rogue binary
+/// whose output we then feed straight into process-killing.
+const LSOF_PATH: &str = "/usr/sbin/lsof";
+
+/// Hard cap on how long we wait for `lsof`. `lsof` is a notorious hang
+/// offender (stale NFS/FUSE mounts, slow name resolution); without a timeout a
+/// single stall would freeze the whole TUI on every refresh tick.
+const LSOF_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listener {
@@ -42,7 +54,11 @@ pub fn parse_lsof(out: &str) -> Vec<Listener> {
             'n' => {
                 if let Some(port) = port_from_addr(val) {
                     if seen.insert((pid, port)) {
-                        listeners.push(Listener { pid, command: command.clone(), port });
+                        listeners.push(Listener {
+                            pid,
+                            command: command.clone(),
+                            port,
+                        });
                     }
                 }
             }
@@ -52,23 +68,31 @@ pub fn parse_lsof(out: &str) -> Vec<Listener> {
     listeners
 }
 
+/// Run `lsof` with a hard timeout. The command runs on a worker thread whose
+/// `output()` call drains the pipe (so no large-output deadlock), and we wait
+/// on the result with [`LSOF_TIMEOUT`]. On timeout we return empty and let the
+/// orphaned `lsof` exit on its own — the UI never blocks waiting for it.
 fn run_lsof(args: &[&str]) -> String {
-    Command::new("lsof")
-        .args(args)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
+    let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = Command::new(LSOF_PATH)
+            .args(&owned)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let _ = tx.send(out);
+    });
+    rx.recv_timeout(LSOF_TIMEOUT).unwrap_or_default()
 }
 
 /// Map of pid → sorted listening ports for every listening TCP socket.
 pub fn ports_by_pid() -> HashMap<u32, Vec<u16>> {
     let out = run_lsof(&["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]);
     let mut map: HashMap<u32, Vec<u16>> = HashMap::new();
+    // `parse_lsof` already dedupes (pid, port) pairs, so a plain push suffices.
     for l in parse_lsof(&out) {
-        let entry = map.entry(l.pid).or_default();
-        if !entry.contains(&l.port) {
-            entry.push(l.port);
-        }
+        map.entry(l.pid).or_default().push(l.port);
     }
     for ports in map.values_mut() {
         ports.sort_unstable();
@@ -91,7 +115,14 @@ mod tests {
     fn parses_pid_command_and_port() {
         let out = "p1234\ncnode\nf10\nn*:3000\n";
         let l = parse_lsof(out);
-        assert_eq!(l, vec![Listener { pid: 1234, command: "node".into(), port: 3000 }]);
+        assert_eq!(
+            l,
+            vec![Listener {
+                pid: 1234,
+                command: "node".into(),
+                port: 3000
+            }]
+        );
     }
 
     #[test]
@@ -99,9 +130,21 @@ mod tests {
         let out = "p1\ncnode\nf3\nn*:3000\nf4\nn127.0.0.1:8080\np2\ncpostgres\nf5\nn[::1]:5432\n";
         let l = parse_lsof(out);
         assert_eq!(l.len(), 3);
-        assert!(l.contains(&Listener { pid: 1, command: "node".into(), port: 3000 }));
-        assert!(l.contains(&Listener { pid: 1, command: "node".into(), port: 8080 }));
-        assert!(l.contains(&Listener { pid: 2, command: "postgres".into(), port: 5432 }));
+        assert!(l.contains(&Listener {
+            pid: 1,
+            command: "node".into(),
+            port: 3000
+        }));
+        assert!(l.contains(&Listener {
+            pid: 1,
+            command: "node".into(),
+            port: 8080
+        }));
+        assert!(l.contains(&Listener {
+            pid: 2,
+            command: "postgres".into(),
+            port: 5432
+        }));
     }
 
     #[test]
@@ -109,7 +152,14 @@ mod tests {
         // lsof prints the same listening socket once per fd (IPv4/IPv6).
         let out = "p596\ncrapportd\nf10\nn*:54801\nf11\nn*:54801\n";
         let l = parse_lsof(out);
-        assert_eq!(l, vec![Listener { pid: 596, command: "rapportd".into(), port: 54801 }]);
+        assert_eq!(
+            l,
+            vec![Listener {
+                pid: 596,
+                command: "rapportd".into(),
+                port: 54801
+            }]
+        );
     }
 
     #[test]
