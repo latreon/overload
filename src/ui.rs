@@ -1,7 +1,10 @@
 use crate::classifier::{classify, Protection};
 use crate::collector::ProcRow;
 use crossterm::event::KeyCode;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// How many CPU samples to retain per row and for the global history.
+pub const HISTORY_LEN: usize = 60;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -68,6 +71,12 @@ pub struct App {
     pub filter: String,
     /// True while the user is typing a filter query.
     pub filtering: bool,
+    /// Per-row CPU sample history, keyed by display-row key (oldest→newest).
+    pub history: HashMap<String, VecDeque<f32>>,
+    /// Global CPU usage history for the header sparkline (oldest→newest).
+    pub cpu_history: VecDeque<f32>,
+    /// Rows the user has marked for batch kill, by display-row key.
+    pub marked: HashSet<String>,
 }
 
 impl App {
@@ -82,6 +91,17 @@ impl App {
             sort: Sort::Cpu,
             filter: String::new(),
             filtering: false,
+            history: HashMap::new(),
+            cpu_history: VecDeque::new(),
+            marked: HashSet::new(),
+        }
+    }
+
+    /// Record one global CPU sample for the header sparkline.
+    pub fn record_cpu(&mut self, cpu_pct: f32) {
+        self.cpu_history.push_back(cpu_pct);
+        while self.cpu_history.len() > HISTORY_LEN {
+            self.cpu_history.pop_front();
         }
     }
 
@@ -112,6 +132,22 @@ impl App {
         }
 
         self.rebuild();
+        self.sample_history();
+    }
+
+    /// Append the current CPU value to each visible row's history, carrying
+    /// over prior samples and dropping rows that no longer exist.
+    fn sample_history(&mut self) {
+        let mut next: HashMap<String, VecDeque<f32>> = HashMap::new();
+        for d in &self.display {
+            let mut dq = self.history.remove(&d.key).unwrap_or_default();
+            dq.push_back(d.cpu_pct);
+            while dq.len() > HISTORY_LEN {
+                dq.pop_front();
+            }
+            next.insert(d.key.clone(), dq);
+        }
+        self.history = next;
     }
 
     /// Recompute the visible rows from raw data, applying filter, grouping and
@@ -203,7 +239,25 @@ impl App {
 
         let len = self.display.len();
         match code {
-            KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
+            KeyCode::Char('q') => Action::Quit,
+            KeyCode::Esc => {
+                // Esc clears an active selection first; only quits when idle.
+                if self.marked.is_empty() {
+                    Action::Quit
+                } else {
+                    self.marked.clear();
+                    Action::None
+                }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(d) = self.display.get(self.selected) {
+                    let key = d.key.clone();
+                    if !self.marked.remove(&key) {
+                        self.marked.insert(key);
+                    }
+                }
+                Action::None
+            }
             KeyCode::Char('/') => {
                 self.filtering = true;
                 Action::None
@@ -255,6 +309,9 @@ impl App {
                 Action::None
             }
             KeyCode::Char('k') => {
+                if !self.marked.is_empty() {
+                    return self.kill_marked();
+                }
                 let Some(d) = self.display.get(self.selected) else {
                     return Action::None;
                 };
@@ -266,6 +323,32 @@ impl App {
                 }
             }
             _ => Action::None,
+        }
+    }
+
+    /// Kill every marked, non-protected row. Clears the marks.
+    fn kill_marked(&mut self) -> Action {
+        let mut pids = Vec::new();
+        let mut rows = 0usize;
+        let mut skipped_protected = 0usize;
+        for d in &self.display {
+            if self.marked.contains(&d.key) {
+                if d.protected {
+                    skipped_protected += 1;
+                } else {
+                    pids.extend(&d.pids);
+                    rows += 1;
+                }
+            }
+        }
+        self.marked.clear();
+        if pids.is_empty() {
+            self.status = Some(format!(
+                "nothing killable selected ({skipped_protected} protected)"
+            ));
+            Action::None
+        } else {
+            Action::Kill(pids, format!("{rows} selected"))
         }
     }
 
@@ -468,6 +551,64 @@ mod tests {
         // Only pid 1 died; pid 2 still alive → still killing.
         a.set_rows(vec![row(2, "Chrome Helper", 5.0)]);
         assert!(a.status.as_deref().unwrap().contains("killing"));
+    }
+
+    #[test]
+    fn history_accumulates_cpu_samples_per_row() {
+        let mut a = App::new();
+        a.set_rows(vec![row(8981, "python", 10.0)]);
+        a.set_rows(vec![row(8981, "python", 20.0)]);
+        let key = a.display[0].key.clone();
+        let hist = a.history.get(&key).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist.back().copied(), Some(20.0));
+    }
+
+    #[test]
+    fn history_drops_rows_that_disappear() {
+        let mut a = App::new();
+        a.set_rows(vec![row(8981, "python", 10.0), row(8982, "node", 5.0)]);
+        a.set_rows(vec![row(8981, "python", 12.0)]);
+        // node is gone → its history is dropped.
+        assert!(a.history.keys().all(|k| !k.contains("8982")));
+        assert_eq!(a.history.len(), 1);
+    }
+
+    #[test]
+    fn space_marks_and_unmarks_the_selected_row() {
+        let mut a = app_with(vec![row(8981, "python", 99.0)]);
+        let key = a.display[0].key.clone();
+        a.handle_key(KeyCode::Char(' '));
+        assert!(a.marked.contains(&key));
+        a.handle_key(KeyCode::Char(' '));
+        assert!(!a.marked.contains(&key));
+    }
+
+    #[test]
+    fn k_with_marks_batch_kills_all_marked_killable_rows() {
+        let mut a = app_with(vec![row(8981, "python", 99.0), row(8982, "node", 50.0)]);
+        a.selected = 0;
+        a.handle_key(KeyCode::Char(' ')); // mark python
+        a.selected = 1;
+        a.handle_key(KeyCode::Char(' ')); // mark node
+        match a.handle_key(KeyCode::Char('k')) {
+            Action::Kill(mut pids, label) => {
+                pids.sort();
+                assert_eq!(pids, vec![8981, 8982]);
+                assert_eq!(label, "2 selected");
+            }
+            other => panic!("expected batch Kill, got {other:?}"),
+        }
+        assert!(a.marked.is_empty(), "marks cleared after kill");
+    }
+
+    #[test]
+    fn esc_clears_marks_before_quitting() {
+        let mut a = app_with(vec![row(8981, "python", 99.0)]);
+        a.handle_key(KeyCode::Char(' ')); // mark one
+        assert_eq!(a.handle_key(KeyCode::Esc), Action::None, "esc clears marks");
+        assert!(a.marked.is_empty());
+        assert_eq!(a.handle_key(KeyCode::Esc), Action::Quit, "esc quits when idle");
     }
 
     #[test]

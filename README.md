@@ -16,8 +16,18 @@ overload --help          # usage
 - `/` — filter by name (type to narrow, `Esc` clears, `Enter` keeps it)
 - `c` / `m` / `n` — sort by CPU / memory / name
 - `t` — toggle grouping of an app's helper processes
-- `k` — kill the selected row (SIGTERM, then SIGKILL after 2s if it survives)
+- `space` — mark/unmark a row for batch kill (`Esc` clears marks)
+- `k` — kill the selected row, or all marked rows (SIGTERM, then SIGKILL after 2s)
 - `q` — quit
+
+**Live trends & gauges.** A gauge bar shows overall CPU and memory meters plus a
+sparkline of recent total CPU. Every row carries a `TREND` sparkline of its own
+recent CPU history, so you can see whether a process is climbing or settling —
+not just its current number. Meters use a smooth green→red gradient.
+
+**Multi-select.** Press `space` to mark several rows (`●`), then `k` to kill
+them all at once — handy for clearing a swarm of leftovers. Protected rows are
+skipped.
 
 **Grouping.** By default, an app's helper processes are collapsed into one row
 (`×9  Google Chrome`) showing combined CPU/RAM. Pressing `k` kills the whole
