@@ -1,8 +1,8 @@
 class Overload < Formula
   desc "macOS terminal tool to find and kill resource-hungry processes fast"
   homepage "https://github.com/latreon/overload"
-  url "https://github.com/latreon/overload/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "8ee1fcc743f06bbfd1e49cb40cbc58e1ebeb3a3e6f5a43e948027736d8bb24dc"
+  url "https://github.com/latreon/overload/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "48ce0bc8fb16f5ee4e77aef30c5e92665f8fca540a196c42ecd24fec08e01b87"
   license "MIT"
   head "https://github.com/latreon/overload.git", branch: "main"
 
