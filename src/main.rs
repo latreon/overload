@@ -760,6 +760,10 @@ fn parse_args(args: &[String]) -> Cmd {
     match args.first().map(String::as_str) {
         None => Cmd::Tui,
         Some("-h") | Some("--help") => Cmd::Help,
+        Some("--json") if args.get(1).map(String::as_str) == Some("--port") => {
+            let reordered: Vec<String> = [&args[1..], &args[..1]].concat();
+            parse_args(&reordered)
+        }
         Some("--port") | Some("--kill-port") => {
             let flag = &args[0];
             let Some(raw) = args.get(1) else {
@@ -818,7 +822,7 @@ fn main() -> io::Result<()> {
             Ok(())
         }
         Cmd::PortJson(p) => {
-            println!("{}", listeners_json(&ports::on_port(p)));
+            println!("{}", listeners_json(&listeners_on(p)));
             Ok(())
         }
         Cmd::KillPort(p) => {
@@ -839,9 +843,18 @@ fn main() -> io::Result<()> {
     }
 }
 
+/// Listeners on a port. Exits with an error when `lsof` fails, so scripts never read
+/// a failed lookup as "nothing listens".
+fn listeners_on(port: u16) -> Vec<ports::Listener> {
+    ports::on_port(port).unwrap_or_else(|| {
+        eprintln!("overload: could not read ports (lsof failed or timed out)");
+        std::process::exit(1);
+    })
+}
+
 /// `--port N`: print the processes listening on a port.
 fn cmd_port(port: u16) {
-    let listeners = ports::on_port(port);
+    let listeners = listeners_on(port);
     if listeners.is_empty() {
         println!("nothing is listening on port {port}");
         return;
@@ -883,7 +896,7 @@ fn json_escape(text: &str) -> String {
 
 /// `--kill-port N`: kill whatever is listening on a port.
 fn cmd_kill_port(port: u16) {
-    let listeners = ports::on_port(port);
+    let listeners = listeners_on(port);
     if listeners.is_empty() {
         println!("nothing is listening on port {port}");
         return;
@@ -1104,6 +1117,15 @@ mod tests {
             parse_args(&args(&["--port", "3000", "--bogus"])),
             Cmd::Error(_)
         ));
+        assert_eq!(
+            parse_args(&args(&["--json", "--port", "3000"])),
+            Cmd::PortJson(3000)
+        );
+        assert!(matches!(
+            parse_args(&args(&["--json", "--port"])),
+            Cmd::Error(_)
+        ));
+        assert!(matches!(parse_args(&args(&["--json"])), Cmd::Error(_)));
     }
 
     #[test]

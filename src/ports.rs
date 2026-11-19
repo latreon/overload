@@ -72,7 +72,7 @@ pub fn parse_lsof(out: &str) -> Vec<Listener> {
 /// `output()` call drains the pipe (so no large-output deadlock), and we wait
 /// on the result with [`LSOF_TIMEOUT`]. On timeout we return empty and let the
 /// orphaned `lsof` exit on its own — the UI never blocks waiting for it.
-fn run_lsof(args: &[&str]) -> String {
+fn run_lsof(args: &[&str]) -> Option<String> {
     let owned: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -80,15 +80,15 @@ fn run_lsof(args: &[&str]) -> String {
             .args(&owned)
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
+            .ok();
         let _ = tx.send(out);
     });
-    rx.recv_timeout(LSOF_TIMEOUT).unwrap_or_default()
+    rx.recv_timeout(LSOF_TIMEOUT).ok().flatten()
 }
 
 /// Map of pid → sorted listening ports for every listening TCP socket.
 pub fn ports_by_pid() -> HashMap<u32, Vec<u16>> {
-    let out = run_lsof(&["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]);
+    let out = run_lsof(&["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]).unwrap_or_default();
     let mut map: HashMap<u32, Vec<u16>> = HashMap::new();
     // `parse_lsof` already dedupes (pid, port) pairs, so a plain push suffices.
     for l in parse_lsof(&out) {
@@ -101,10 +101,10 @@ pub fn ports_by_pid() -> HashMap<u32, Vec<u16>> {
 }
 
 /// Processes listening on a specific TCP port.
-pub fn on_port(port: u16) -> Vec<Listener> {
+/// `None` when `lsof` failed or timed out, so "no answer" is not read as "nothing listens".
+pub fn on_port(port: u16) -> Option<Vec<Listener>> {
     let arg = format!("-iTCP:{port}");
-    let out = run_lsof(&["-nP", &arg, "-sTCP:LISTEN", "-Fpcn"]);
-    parse_lsof(&out)
+    run_lsof(&["-nP", &arg, "-sTCP:LISTEN", "-Fpcn"]).map(|out| parse_lsof(&out))
 }
 
 #[cfg(test)]
