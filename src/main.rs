@@ -726,6 +726,7 @@ enum Cmd {
     Tui,
     Help,
     Port(u16),
+    PortJson(u16),
     KillPort(u16),
     Error(String),
 }
@@ -741,10 +742,14 @@ fn parse_args(args: &[String]) -> Cmd {
             };
             match raw.parse::<u16>() {
                 Ok(p) if p > 0 => {
-                    if flag == "--port" {
-                        Cmd::Port(p)
-                    } else {
+                    if flag != "--port" {
                         Cmd::KillPort(p)
+                    } else {
+                        match args.get(2).map(String::as_str) {
+                            None => Cmd::Port(p),
+                            Some("--json") => Cmd::PortJson(p),
+                            Some(other) => Cmd::Error(format!("unknown argument: {other}")),
+                        }
                     }
                 }
                 _ => Cmd::Error(format!("invalid port: {raw}")),
@@ -759,6 +764,8 @@ const USAGE: &str = "overload — find and kill resource-hungry processes
 USAGE:
     overload                 Launch the interactive TUI
     overload --port <N>      Show what is listening on TCP port N
+    overload --port <N> --json
+                             Same, as a JSON array for scripts
     overload --kill-port <N> Kill whatever is listening on TCP port N
     overload --help          Show this help
 
@@ -777,6 +784,10 @@ fn main() -> io::Result<()> {
         }
         Cmd::Port(p) => {
             cmd_port(p);
+            Ok(())
+        }
+        Cmd::PortJson(p) => {
+            println!("{}", listeners_json(&ports::on_port(p)));
             Ok(())
         }
         Cmd::KillPort(p) => {
@@ -802,6 +813,35 @@ fn cmd_port(port: u16) {
     for l in listeners {
         println!("  {:>7}  {}", l.pid, l.command);
     }
+}
+
+/// Listeners as a JSON array: `[{"pid":1,"command":"node","port":3000}]`.
+fn listeners_json(listeners: &[ports::Listener]) -> String {
+    let items: Vec<String> = listeners
+        .iter()
+        .map(|l| {
+            format!(
+                r#"{{"pid":{},"command":"{}","port":{}}}"#,
+                l.pid,
+                json_escape(&l.command),
+                l.port
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+fn json_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            control if control < ' ' => escaped.push_str(&format!("\\u{:04x}", control as u32)),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// `--kill-port N`: kill whatever is listening on a port.
@@ -970,6 +1010,39 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["--kill-port", "8080"])),
             Cmd::KillPort(8080)
+        );
+    }
+
+    #[test]
+    fn parse_args_maps_port_json() {
+        assert_eq!(
+            parse_args(&args(&["--port", "3000", "--json"])),
+            Cmd::PortJson(3000)
+        );
+        assert!(matches!(
+            parse_args(&args(&["--port", "3000", "--bogus"])),
+            Cmd::Error(_)
+        ));
+    }
+
+    #[test]
+    fn listeners_json_escapes_and_handles_empty() {
+        assert_eq!(listeners_json(&[]), "[]");
+        let listeners = [
+            ports::Listener {
+                pid: 7,
+                command: "no\"de\\x".to_string(),
+                port: 3000,
+            },
+            ports::Listener {
+                pid: 8,
+                command: "py".to_string(),
+                port: 8080,
+            },
+        ];
+        assert_eq!(
+            listeners_json(&listeners),
+            r#"[{"pid":7,"command":"no\"de\\x","port":3000},{"pid":8,"command":"py","port":8080}]"#
         );
     }
 
