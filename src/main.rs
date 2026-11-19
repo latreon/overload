@@ -28,6 +28,8 @@ const EXTRA_WIDE_TABLE: u16 = 140;
 /// Name column width on wide screens, so the detail columns get the space.
 const NAME_WIDTH: u16 = 24;
 const HELP: &str = " j/↑↓ move · / filter · c m n sort · t group · space mark · p pin · k kill · K kill one · ? help · q quit ";
+/// Key bar for narrow terminals, where `HELP` would be cut off.
+const SHORT_HELP: &str = " j/↑↓ move · / filter · c m n sort · k kill · ? all keys · q quit ";
 
 /// Levels for sparkline / bar glyphs, low → high.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -600,7 +602,14 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             .border_type(BorderType::Rounded)
             .border_style(dim)
             .title(Line::from(title))
-            .title_bottom(Span::styled(HELP, dim)),
+            .title_bottom(Span::styled(
+                if table_area.width as usize > HELP.chars().count() + 2 {
+                    HELP
+                } else {
+                    SHORT_HELP
+                },
+                dim,
+            )),
     );
 
     frame.render_widget(table, table_area);
@@ -1055,5 +1064,35 @@ mod tests {
             text.contains(&target_pid),
             "selected row (pid {target_pid}) should be scrolled into view"
         );
+    }
+
+    #[test]
+    fn render_shows_stat_tiles_and_why_slow() {
+        let mut app = App::new();
+        app.set_rows(vec![proc(5000, "node", 95.0, 1.0)]);
+        let text = rendered_text(&app, 100, 12);
+        for tile in ["CPU", "MEMORY", "SWAP", "MAC"] {
+            assert!(text.contains(tile), "{tile} tile missing");
+        }
+        assert!(text.contains("node uses 95% CPU"), "why slow line missing");
+    }
+
+    #[test]
+    fn key_bar_is_short_on_narrow_terminals() {
+        let mut app = App::new();
+        app.set_rows(vec![proc(5000, "node", 10.0, 1.0)]);
+        assert!(rendered_text(&app, 80, 12).contains("? all keys"));
+        assert!(rendered_text(&app, 160, 12).contains("K kill one"));
+    }
+
+    #[test]
+    fn format_helpers_use_short_units() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(520 * 1024 * 1024), "520 MB");
+        assert_eq!(format_bytes(2_576_980_378), "2.4 GB");
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(38 * 60), "38m");
+        assert_eq!(format_duration(6 * 3_600 + 12 * 60), "6h 12m");
+        assert_eq!(format_duration(2 * 86_400 + 4 * 3_600), "2d 4h");
     }
 }

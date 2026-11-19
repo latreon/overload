@@ -40,6 +40,8 @@ again.
 
 **Heavy app alert.** A row that stays over 80% CPU for 30 seconds turns red
 (`⚠`) and macOS shows a notification. It can alert again after it cools down.
+The first time, macOS may ask to allow notifications from Script Editor (the
+notice is sent with the built-in `osascript`); allow it to see alerts.
 
 **Multi-select.** Press `space` to mark several rows (`●`), then `k` to kill
 them all at once — handy for clearing a swarm of leftovers. Protected rows are

@@ -316,9 +316,7 @@ impl App {
                     .partial_cmp(&a.ram_pct)
                     .unwrap_or(std::cmp::Ordering::Equal)
             }),
-            Sort::Name => {
-                display.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
-            }
+            Sort::Name => display.sort_by_key(|d| d.label.to_lowercase()),
         }
         display.sort_by_key(|d| !self.pinned.contains(&d.key));
         let sorted_rank: HashMap<String, usize> = display
@@ -798,5 +796,94 @@ mod tests {
         a.selected = 2;
         a.set_rows(vec![row(1, "a", 9.0)]);
         assert_eq!(a.selected, 0);
+    }
+
+    #[test]
+    fn refresh_keeps_order_and_reports_moves() {
+        let mut a = app_with(vec![row(1001, "slack", 90.0), row(1002, "node", 10.0)]);
+        a.set_rows(vec![row(1001, "slack", 3.0), row(1002, "node", 50.0)]);
+        assert_eq!(a.display[0].label, "slack", "order kept after refresh");
+        assert_eq!(a.display[0].moves, -1, "slack would move down one place");
+        assert_eq!(a.display[1].moves, 1, "node would move up one place");
+        a.handle_key(KeyCode::Char('c'));
+        assert_eq!(a.display[0].label, "node", "c sorts again");
+        assert!(a.display.iter().all(|d| d.moves == 0));
+    }
+
+    #[test]
+    fn new_rows_go_to_the_bottom_until_sorted() {
+        let mut a = app_with(vec![row(1001, "slack", 10.0)]);
+        a.set_rows(vec![row(1001, "slack", 10.0), row(1003, "python", 99.0)]);
+        assert_eq!(a.display[1].label, "python", "new row added at the bottom");
+        assert!(!a.sorted_keys.contains(&a.display[1].key), "shown as new");
+        a.handle_key(KeyCode::Char('c'));
+        assert_eq!(a.display[0].label, "python");
+        assert!(a.sorted_keys.contains(&a.display[0].key), "no longer new");
+    }
+
+    #[test]
+    fn p_pins_the_row_on_top_and_unpins_it() {
+        let mut a = app_with(vec![row(1001, "slack", 90.0), row(1002, "node", 10.0)]);
+        a.selected = 1;
+        a.handle_key(KeyCode::Char('p'));
+        assert_eq!(a.display[0].label, "node", "pinned row moves to the top");
+        assert_eq!(a.selected, 0, "cursor follows the pinned row");
+        a.handle_key(KeyCode::Char('p'));
+        assert!(a.pinned.is_empty());
+    }
+
+    #[test]
+    fn shift_k_kills_only_the_first_member_of_a_group() {
+        let mut a = app_with(vec![
+            row(1001, "Google Chrome Helper (Renderer)", 10.0),
+            row(1002, "Google Chrome Helper (GPU)", 5.0),
+        ]);
+        assert_eq!(
+            a.handle_key(KeyCode::Char('K')),
+            Action::Kill(vec![1001], "Google Chrome (1001)".to_string())
+        );
+    }
+
+    #[test]
+    fn alert_fires_once_after_sustained_high_cpu() {
+        let mut a = App::new();
+        for _ in 0..ALERT_SAMPLES - 1 {
+            a.set_rows(vec![row(5000, "node", 95.0)]);
+        }
+        assert!(a.new_alerts.is_empty(), "not yet 30 seconds");
+        a.set_rows(vec![row(5000, "node", 95.0)]);
+        assert_eq!(a.new_alerts, vec!["node".to_string()]);
+        assert!(a.is_alerted(&a.display[0].key));
+        a.set_rows(vec![row(5000, "node", 95.0)]);
+        assert_eq!(a.new_alerts.len(), 1, "no second alert while still hot");
+        a.set_rows(vec![row(5000, "node", 5.0)]);
+        assert!(
+            !a.is_alerted(&a.display[0].key),
+            "cleared after cooling down"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_help_and_any_key_closes_it() {
+        let mut a = app_with(vec![row(1001, "node", 10.0)]);
+        a.handle_key(KeyCode::Char('?'));
+        assert!(a.show_help);
+        assert_eq!(
+            a.handle_key(KeyCode::Char('q')),
+            Action::None,
+            "q only closes help"
+        );
+        assert!(!a.show_help);
+    }
+
+    #[test]
+    fn confirmed_kill_is_added_to_the_kill_log() {
+        let mut a = app_with(vec![row(1001, "node", 10.0)]);
+        a.register_kill(vec![1001], "node".to_string());
+        a.set_rows(vec![]);
+        assert_eq!(
+            a.kill_log.back().map(|(_, label)| label.as_str()),
+            Some("node")
+        );
     }
 }
