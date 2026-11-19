@@ -78,7 +78,8 @@ mistake.
 ### Homebrew
 
 ```
-brew install latreon/tap/overload
+brew tap latreon/tap     # once
+brew install overload
 brew upgrade overload    # later, for new versions
 ```
 
