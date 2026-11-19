@@ -43,8 +43,9 @@ after you press `k` and flips to `✓ killed` once the process is gone, staying
 visible until your next action. Below it, a summary line shows load average,
 global CPU%, memory used%, process count, and the current sort/group/filter
 state. Each row has a heat-colored CPU/RAM meter (green → yellow → red), and the
-selected row stays pinned near the center so it doesn't jump as the list
-re-sorts. The list is always sorted highest-first by the active sort key.
+selected row stays pinned near the center. Rows keep their order between
+refreshes and new processes are added at the bottom. Press `c` / `m` / `n` to
+sort again by the active key.
 
 System-critical processes (WindowServer, kernel_task, launchd, securityd,
 opendirectoryd, …) are shown greyed and cannot be killed — neither by SIGTERM

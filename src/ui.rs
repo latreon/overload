@@ -131,7 +131,7 @@ impl App {
             }
         }
 
-        self.rebuild();
+        self.rebuild(true);
         self.sample_history();
     }
 
@@ -152,8 +152,19 @@ impl App {
 
     /// Recompute the visible rows from raw data, applying filter, grouping and
     /// sort, while keeping the cursor on the same logical row when possible.
-    pub fn rebuild(&mut self) {
+    /// With `keep_order`, rows already on screen keep their place and new rows
+    /// go below them, so the list doesn't reshuffle every tick.
+    pub fn rebuild(&mut self, keep_order: bool) {
         let prev_key = self.display.get(self.selected).map(|d| d.key.clone());
+        let previous_order: HashMap<String, usize> = if keep_order {
+            self.display
+                .iter()
+                .enumerate()
+                .map(|(index, d)| (d.key.clone(), index))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let q = self.filter.to_lowercase();
 
         let filtered = self
@@ -222,6 +233,7 @@ impl App {
                 display.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
             }
         }
+        display.sort_by_key(|d| previous_order.get(&d.key).copied().unwrap_or(usize::MAX));
 
         self.display = display;
 
@@ -294,22 +306,22 @@ impl App {
             }
             KeyCode::Char('c') => {
                 self.sort = Sort::Cpu;
-                self.rebuild();
+                self.rebuild(false);
                 Action::None
             }
             KeyCode::Char('m') => {
                 self.sort = Sort::Ram;
-                self.rebuild();
+                self.rebuild(false);
                 Action::None
             }
             KeyCode::Char('n') => {
                 self.sort = Sort::Name;
-                self.rebuild();
+                self.rebuild(false);
                 Action::None
             }
             KeyCode::Char('t') => {
                 self.grouped = !self.grouped;
-                self.rebuild();
+                self.rebuild(true);
                 Action::None
             }
             KeyCode::Char('k') => {
@@ -361,18 +373,18 @@ impl App {
             KeyCode::Esc => {
                 self.filtering = false;
                 self.filter.clear();
-                self.rebuild();
+                self.rebuild(true);
             }
             KeyCode::Enter => {
                 self.filtering = false;
             }
             KeyCode::Backspace => {
                 self.filter.pop();
-                self.rebuild();
+                self.rebuild(true);
             }
             KeyCode::Char(c) => {
                 self.filter.push(c);
-                self.rebuild();
+                self.rebuild(true);
             }
             _ => {}
         }
