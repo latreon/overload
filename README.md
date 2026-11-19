@@ -29,7 +29,9 @@ turn yellow at 70% and red at 90%. Under the tiles, one line names the problem
 in plain words, for example `⚠ node uses 95% CPU · swap 1.2 GB in use`, and
 says if the list is out of order. Every row carries a `TREND` sparkline
 of its own recent CPU history. Wide terminals (120+ columns) also show memory
-size, disk speed, uptime and the 60s CPU peak per row.
+size, disk reads and writes per second, uptime and the CPU peak per row, and
+140+ columns add the process state and average CPU. On wide screens the name
+column stays narrow and the trend gets the extra space.
 
 **Stable order.** Rows keep their place between refreshes, so the row you look
 at doesn't jump. `MOVE` shows how far a row would move if you sort again (`↑5`,

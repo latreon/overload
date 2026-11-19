@@ -5,7 +5,7 @@ mod ports;
 mod ui;
 
 use crate::collector::{Collector, SysStats};
-use crate::ui::{Action, App, Sort, ALERT_CPU};
+use crate::ui::{Action, App, Sort, ALERT_CPU, HISTORY_LEN};
 use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -21,8 +21,12 @@ use std::time::{Duration, Instant};
 const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
 const SPARK_WIDTH: usize = 12;
-/// Narrower tables drop the MEM, DISK/s, UPTIME and PEAK columns.
+/// Narrower tables drop the MEM, READ/s, WRITE/s, UPTIME and PEAK columns.
 const WIDE_TABLE: u16 = 120;
+/// From this width the table also shows STATE and AVG.
+const EXTRA_WIDE_TABLE: u16 = 140;
+/// Name column width on wide screens, so the detail columns get the space.
+const NAME_WIDTH: u16 = 24;
 const HELP: &str = " j/↑↓ move · / filter · c m n sort · t group · space mark · p pin · k kill · K kill one · ? help · q quit ";
 
 /// Levels for sparkline / bar glyphs, low → high.
@@ -344,6 +348,48 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
 
     let table_area = chunks[2];
     let is_wide = table_area.width >= WIDE_TABLE;
+    let is_extra_wide = table_area.width >= EXTRA_WIDE_TABLE;
+    let cpu_bar_width = if is_wide { 8 } else { CPU_BAR_WIDTH };
+
+    let mut widths = vec![
+        Constraint::Length(1),
+        Constraint::Length(4),
+        Constraint::Length(6),
+        Constraint::Min(if is_wide { NAME_WIDTH } else { 12 }),
+        Constraint::Length(cpu_bar_width as u16 + 5),
+        Constraint::Length(6),
+    ];
+    if is_wide {
+        widths.extend([
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(8),
+        ]);
+    }
+    if is_extra_wide {
+        widths.extend([Constraint::Length(9), Constraint::Length(4)]);
+    }
+    if is_wide {
+        widths.push(Constraint::Length(5));
+    }
+    // On wide screens TREND takes the space left after the fixed columns.
+    let trend_width = if is_wide {
+        let used: u16 = widths
+            .iter()
+            .map(|width| match width {
+                Constraint::Length(cells) | Constraint::Min(cells) => cells + 1,
+                _ => 1,
+            })
+            .sum();
+        table_area
+            .width
+            .saturating_sub(used + 2)
+            .clamp(SPARK_WIDTH as u16, HISTORY_LEN as u16)
+    } else {
+        SPARK_WIDTH as u16
+    };
+    widths.push(Constraint::Length(trend_width));
 
     // Pin the selected row near the vertical center; the list scrolls around it.
     let view_h = (table_area.height.saturating_sub(3)).max(1) as usize; // borders + header
@@ -357,7 +403,13 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
 
     let mut header = vec![" ", "MOVE", "PID", "NAME", "CPU", "RAM"];
     if is_wide {
-        header.extend(["MEM", "DISK/s", "UPTIME", "PEAK"]);
+        header.extend(["MEM", "READ/s", "WRITE/s", "UPTIME"]);
+    }
+    if is_extra_wide {
+        header.extend(["STATE", "AVG"]);
+    }
+    if is_wide {
+        header.push("PEAK");
     }
     header.push("TREND");
     let header = Row::new(header)
@@ -436,14 +488,25 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
 
             let cpu_txt = format!(
                 "{} {:>3.0}",
-                bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH),
+                bar(d.cpu_pct / 100.0, cpu_bar_width),
                 d.cpu_pct
             );
             let history = app.history.get(&d.key);
-            let trend = history.map(|h| spark(h, SPARK_WIDTH)).unwrap_or_default();
+            let trend = history
+                .map(|h| spark(h, trend_width as usize))
+                .unwrap_or_default();
             let peak = history
                 .and_then(|h| h.iter().copied().reduce(f32::max))
                 .unwrap_or(d.cpu_pct);
+            let average = history
+                .filter(|h| !h.is_empty())
+                .map_or(d.cpu_pct, |h| h.iter().sum::<f32>() / h.len() as f32);
+            let state_style = match d.state.as_str() {
+                "runnable" => Style::default().fg(Color::Green),
+                "stopped" => Style::default().fg(Color::Yellow),
+                "zombie" => Style::default().fg(Color::Red),
+                _ => dim,
+            };
 
             let (cpu_style, ram_style, trend_style) = if d.protected {
                 (dim, dim, dim)
@@ -472,10 +535,19 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             if is_wide {
                 cells.extend([
                     Cell::from(format!("{:>8}", format_bytes(d.mem_bytes))),
-                    Cell::from(format!("{:>8}", format_bytes(d.disk_per_sec))).style(dim),
+                    Cell::from(format!("{:>8}", format_bytes(d.read_per_sec))).style(dim),
+                    Cell::from(format!("{:>8}", format_bytes(d.write_per_sec))).style(dim),
                     Cell::from(format_duration(d.run_time_secs)).style(dim),
-                    Cell::from(format!("{peak:>4.0}")).style(dim),
                 ]);
+            }
+            if is_extra_wide {
+                cells.extend([
+                    Cell::from(d.state.clone()).style(state_style),
+                    Cell::from(format!("{average:>4.0}")).style(dim),
+                ]);
+            }
+            if is_wide {
+                cells.push(Cell::from(format!("{peak:>5.0}")).style(dim));
             }
             cells.push(Cell::from(trend).style(trend_style));
             let mut row = Row::new(cells);
@@ -490,23 +562,6 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         })
         .collect();
 
-    let mut widths = vec![
-        Constraint::Length(1),
-        Constraint::Length(4),
-        Constraint::Length(6),
-        Constraint::Min(12),
-        Constraint::Length(CPU_BAR_WIDTH as u16 + 5),
-        Constraint::Length(6),
-    ];
-    if is_wide {
-        widths.extend([
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(7),
-            Constraint::Length(4),
-        ]);
-    }
-    widths.push(Constraint::Length(SPARK_WIDTH as u16));
     // The top border carries the brand, the last action and the view state.
     let mut title = vec![Span::styled(
         " overload ",

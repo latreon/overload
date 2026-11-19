@@ -51,9 +51,12 @@ pub struct DisplayRow {
     /// Listening TCP ports (union across the group's members), sorted.
     pub ports: Vec<u16>,
     pub mem_bytes: u64,
-    pub disk_per_sec: u64,
+    pub read_per_sec: u64,
+    pub write_per_sec: u64,
     /// Run time of the oldest member.
     pub run_time_secs: u64,
+    /// State of the first (busiest) member.
+    pub state: String,
     /// How many places the row would move up (positive) or down (negative)
     /// if the list were sorted again now.
     pub moves: i32,
@@ -255,14 +258,17 @@ impl App {
                     protected: false,
                     ports: Vec::new(),
                     mem_bytes: 0,
-                    disk_per_sec: 0,
+                    read_per_sec: 0,
+                    write_per_sec: 0,
                     run_time_secs: 0,
+                    state: r.state.clone(),
                     moves: 0,
                 });
                 entry.cpu_pct += r.cpu_pct;
                 entry.ram_pct += r.ram_pct;
                 entry.mem_bytes += r.mem_bytes;
-                entry.disk_per_sec += r.disk_per_sec;
+                entry.read_per_sec += r.read_per_sec;
+                entry.write_per_sec += r.write_per_sec;
                 entry.run_time_secs = entry.run_time_secs.max(r.run_time_secs);
                 entry.pids.push(r.pid);
                 entry.count += 1;
@@ -290,8 +296,10 @@ impl App {
                     protected: classify(&r.name, r.pid) == Protection::Protected,
                     ports: r.ports.clone(),
                     mem_bytes: r.mem_bytes,
-                    disk_per_sec: r.disk_per_sec,
+                    read_per_sec: r.read_per_sec,
+                    write_per_sec: r.write_per_sec,
                     run_time_secs: r.run_time_secs,
+                    state: r.state.clone(),
                     moves: 0,
                 })
                 .collect()

@@ -8,9 +8,12 @@ pub struct ProcRow {
     pub cpu_pct: f32,
     pub ram_pct: f32,
     pub mem_bytes: u64,
-    /// Disk read + write since the previous snapshot, per second.
-    pub disk_per_sec: u64,
+    /// Disk reads and writes since the previous snapshot, per second.
+    pub read_per_sec: u64,
+    pub write_per_sec: u64,
     pub run_time_secs: u64,
+    /// "running", "sleeping", "zombie", …
+    pub state: String,
     /// Listening TCP ports for this pid (filled in by the caller via the
     /// `ports` module; empty when not collected).
     pub ports: Vec<u16>,
@@ -105,9 +108,10 @@ impl Collector {
                 cpu_pct: p.cpu_usage(),
                 ram_pct: (p.memory() as f64 / self.total_mem as f64 * 100.0) as f32,
                 mem_bytes: p.memory(),
-                disk_per_sec: ((p.disk_usage().read_bytes + p.disk_usage().written_bytes) as f64
-                    / elapsed_secs) as u64,
+                read_per_sec: (p.disk_usage().read_bytes as f64 / elapsed_secs) as u64,
+                write_per_sec: (p.disk_usage().written_bytes as f64 / elapsed_secs) as u64,
                 run_time_secs: p.run_time(),
+                state: p.status().to_string().to_lowercase(),
                 ports: Vec::new(),
             })
             .collect();
