@@ -32,6 +32,7 @@ overload                     # open the live list
 overload --port 3000         # what is listening on port 3000
 overload --kill-port 3000    # free port 3000 (fixes EADDRINUSE)
 overload --port 3000 --json  # same as --port, as JSON for scripts
+overload --kill node         # kill every process named node
 overload --help              # all options
 ```
 
@@ -55,6 +56,12 @@ $ overload --port 3000 --json
 $ overload --port 3000 --json | jq -r '.[].pid'
 48213
 ```
+
+`--kill <name>` matches the full process name, ignoring case. It also matches an
+app's helpers, so `overload --kill "Google Chrome"` closes the whole app.
+`--kill node` does not touch `nodemon`. Protected system processes are skipped.
+It waits up to 2.5 seconds, so the `SIGKILL` fallback has time to run. Exit code is
+`1` when nothing matched or a process is still running.
 
 ## Keys
 

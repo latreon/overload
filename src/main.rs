@@ -728,6 +728,7 @@ enum Cmd {
     Port(u16),
     PortJson(u16),
     KillPort(u16),
+    KillName(String),
     Error(String),
 }
 
@@ -755,6 +756,10 @@ fn parse_args(args: &[String]) -> Cmd {
                 _ => Cmd::Error(format!("invalid port: {raw}")),
             }
         }
+        Some("--kill") => match args.get(1) {
+            Some(name) if !name.trim().is_empty() => Cmd::KillName(name.trim().to_string()),
+            _ => Cmd::Error("--kill needs a process or app name".to_string()),
+        },
         Some(other) => Cmd::Error(format!("unknown argument: {other}")),
     }
 }
@@ -767,6 +772,8 @@ USAGE:
     overload --port <N> --json
                              Same, as a JSON array for scripts
     overload --kill-port <N> Kill whatever is listening on TCP port N
+    overload --kill <name>   Kill every process with that name (case-insensitive),
+                             including an app's helpers: --kill \"Google Chrome\"
     overload --help          Show this help
 
 TUI KEYS:
@@ -792,6 +799,12 @@ fn main() -> io::Result<()> {
         }
         Cmd::KillPort(p) => {
             cmd_kill_port(p);
+            Ok(())
+        }
+        Cmd::KillName(name) => {
+            if !cmd_kill_name(&name) {
+                std::process::exit(1);
+            }
             Ok(())
         }
         Cmd::Error(msg) => {
@@ -857,6 +870,50 @@ fn cmd_kill_port(port: u16) {
             Err(e) => println!("could not kill {} ({}): {e:?}", l.command, l.pid),
         }
     }
+}
+
+/// True when a process is called `wanted` (lowercase), or is a helper of the app called that.
+fn matches_name(process_name: &str, wanted: &str) -> bool {
+    process_name.to_lowercase() == wanted || ui::app_group(process_name).to_lowercase() == wanted
+}
+
+/// `--kill NAME`: kill every matching process. Returns false when nothing matched or a
+/// matching process is still running after the kill window.
+fn cmd_kill_name(name: &str) -> bool {
+    let wanted = name.to_lowercase();
+    let own_pid = std::process::id();
+    let targets: Vec<_> = Collector::new()
+        .snapshot()
+        .into_iter()
+        .filter(|row| row.pid != own_pid && matches_name(&row.name, &wanted))
+        .collect();
+    if targets.is_empty() {
+        println!("no process named {name}");
+        return false;
+    }
+    let mut sent = Vec::new();
+    for row in &targets {
+        match killer::kill(row.pid, &row.name) {
+            Ok(()) => {
+                println!("killed {} ({})", row.name, row.pid);
+                sent.push(row);
+            }
+            Err(e) => println!("could not kill {} ({}): {e:?}", row.name, row.pid),
+        }
+    }
+    // The SIGKILL fallback runs on a thread 2s after SIGTERM, so stay alive until it has run.
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline && sent.iter().any(|row| killer::is_alive(row.pid)) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let survivors: Vec<_> = sent
+        .iter()
+        .filter(|row| killer::is_alive(row.pid))
+        .collect();
+    for row in &survivors {
+        println!("still running: {} ({})", row.name, row.pid);
+    }
+    survivors.is_empty() && sent.len() == targets.len()
 }
 
 /// Take a process snapshot and annotate each row with its listening ports.
@@ -1026,6 +1083,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_maps_kill_name() {
+        assert_eq!(
+            parse_args(&args(&["--kill", " Google Chrome "])),
+            Cmd::KillName("Google Chrome".to_string())
+        );
+        assert!(matches!(parse_args(&args(&["--kill"])), Cmd::Error(_)));
+        assert!(matches!(
+            parse_args(&args(&["--kill", "  "])),
+            Cmd::Error(_)
+        ));
+    }
+
+    #[test]
     fn listeners_json_escapes_and_handles_empty() {
         assert_eq!(listeners_json(&[]), "[]");
         let listeners = [
@@ -1044,6 +1114,17 @@ mod tests {
             listeners_json(&listeners),
             r#"[{"pid":7,"command":"no\"de\\x","port":3000},{"pid":8,"command":"py","port":8080}]"#
         );
+    }
+
+    #[test]
+    fn matches_name_is_case_insensitive_and_includes_helpers() {
+        assert!(matches_name("Node", "node"));
+        assert!(matches_name(
+            "Google Chrome Helper (Renderer)",
+            "google chrome"
+        ));
+        assert!(!matches_name("nodemon", "node"));
+        assert!(!matches_name("Google Chrome", "chrom"));
     }
 
     #[test]

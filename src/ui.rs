@@ -64,7 +64,7 @@ pub struct DisplayRow {
 
 /// Collapse a process name to its app group by trimming helper/parenthetical
 /// suffixes: "Google Chrome Helper (Renderer)" → "Google Chrome".
-fn app_group(name: &str) -> String {
+pub fn app_group(name: &str) -> String {
     let mut s = name;
     if let Some(i) = s.find(" Helper") {
         s = &s[..i];
