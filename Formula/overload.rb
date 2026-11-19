@@ -7,6 +7,7 @@ class Overload < Formula
   head "https://github.com/latreon/overload.git", branch: "main"
 
   depends_on "rust" => :build
+  depends_on :macos
 
   def install
     system "cargo", "install", *std_cargo_args
