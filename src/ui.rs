@@ -305,6 +305,9 @@ impl App {
                 .collect()
         };
 
+        // Start from the current order so rows with equal values (many idle
+        // apps at 0% CPU) keep their place and don't count as moved.
+        display.sort_by_key(|d| previous_order.get(&d.key).copied().unwrap_or(usize::MAX));
         match self.sort {
             Sort::Cpu => display.sort_by(|a, b| {
                 b.cpu_pct

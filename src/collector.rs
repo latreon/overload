@@ -97,6 +97,8 @@ impl Collector {
             .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let elapsed_secs = self.last_snapshot.elapsed().as_secs_f64().max(0.001);
         self.last_snapshot = Instant::now();
+        // Some system processes report no start time, which counts from 1970.
+        let uptime_secs = System::uptime();
 
         let mut rows: Vec<ProcRow> = self
             .sys
@@ -110,7 +112,7 @@ impl Collector {
                 mem_bytes: p.memory(),
                 read_per_sec: (p.disk_usage().read_bytes as f64 / elapsed_secs) as u64,
                 write_per_sec: (p.disk_usage().written_bytes as f64 / elapsed_secs) as u64,
-                run_time_secs: p.run_time(),
+                run_time_secs: p.run_time().min(uptime_secs),
                 state: p.status().to_string().to_lowercase(),
                 ports: Vec::new(),
             })
