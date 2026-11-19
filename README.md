@@ -2,6 +2,8 @@
 
 A macOS terminal tool to find and kill resource hogs fast.
 
+![overload demo: stat tiles, stable list with MOVE arrows, pin and the help popup](docs/demo.gif)
+
 ## Usage
 
 ```
