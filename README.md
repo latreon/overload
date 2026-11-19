@@ -79,10 +79,11 @@ mistake.
 
 ```
 brew install latreon/tap/overload
+brew upgrade overload    # later, for new versions
 ```
 
-(or install the formula directly:
-`brew install https://raw.githubusercontent.com/latreon/overload/main/Formula/overload.rb`)
+If Homebrew says the tap is untrusted, run `brew trust latreon/tap` once and
+install again.
 
 ### From source
 

@@ -91,4 +91,6 @@ Module responsibilities:
 ## Release
 
 Version lives in `Cargo.toml` and must be mirrored in `Formula/overload.rb` (`url` tag + `sha256`
-of the GitHub tarball). Tag `v<version>`, then bump the formula.
+of the GitHub tarball). Tag `v<version>`, then bump the formula and copy it to
+`Formula/overload.rb` in the tap repo `latreon/homebrew-tap`, which is what
+`brew install latreon/tap/overload` reads.
