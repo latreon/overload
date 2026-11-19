@@ -373,7 +373,8 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     if is_wide {
         widths.push(Constraint::Length(5));
     }
-    // On wide screens TREND takes the space left after the fixed columns.
+    // On wide screens TREND takes the space left after the fixed columns,
+    // minus 10% of the width that goes to NAME instead.
     let trend_width = if is_wide {
         let used: u16 = widths
             .iter()
@@ -384,7 +385,7 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             .sum();
         table_area
             .width
-            .saturating_sub(used + 2)
+            .saturating_sub(used + 2 + table_area.width / 10)
             .clamp(SPARK_WIDTH as u16, HISTORY_LEN as u16)
     } else {
         SPARK_WIDTH as u16
