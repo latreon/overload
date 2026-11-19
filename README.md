@@ -31,10 +31,30 @@ Update later with `brew upgrade overload`.
 overload                     # open the live list
 overload --port 3000         # what is listening on port 3000
 overload --kill-port 3000    # free port 3000 (fixes EADDRINUSE)
+overload --port 3000 --json  # same as --port, as JSON for scripts
 overload --help              # all options
 ```
 
 Open it, look at the red rows, select one and press `k`. That's it.
+
+### Port already in use?
+
+`Error: listen EADDRINUSE: address already in use :::3000`
+
+```bash
+overload --port 3000         # see who holds it
+overload --kill-port 3000    # free it
+```
+
+For scripts, `--json` prints an array. It is `[]` when nothing listens:
+
+```bash
+$ overload --port 3000 --json
+[{"pid":48213,"command":"node","port":3000}]
+
+$ overload --port 3000 --json | jq -r '.[].pid'
+48213
+```
 
 ## Keys
 
