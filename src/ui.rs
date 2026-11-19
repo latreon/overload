@@ -57,6 +57,8 @@ pub struct DisplayRow {
     pub run_time_secs: u64,
     /// State of the first (busiest) member.
     pub state: String,
+    /// Working directory of the first member. Shown only for single processes.
+    pub cwd: String,
     /// How many places the row would move up (positive) or down (negative)
     /// if the list were sorted again now.
     pub moves: i32,
@@ -262,6 +264,7 @@ impl App {
                     write_per_sec: 0,
                     run_time_secs: 0,
                     state: r.state.clone(),
+                    cwd: r.cwd.clone(),
                     moves: 0,
                 });
                 entry.cpu_pct += r.cpu_pct;
@@ -300,6 +303,7 @@ impl App {
                     write_per_sec: r.write_per_sec,
                     run_time_secs: r.run_time_secs,
                     state: r.state.clone(),
+                    cwd: r.cwd.clone(),
                     moves: 0,
                 })
                 .collect()

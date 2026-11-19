@@ -25,6 +25,9 @@ const SPARK_WIDTH: usize = 12;
 const WIDE_TABLE: u16 = 120;
 /// From this width the table also shows STATE and AVG.
 const EXTRA_WIDE_TABLE: u16 = 140;
+/// From this width the table also shows the FOLDER a process runs from.
+const FOLDER_TABLE: u16 = 160;
+const FOLDER_WIDTH: u16 = 24;
 /// Name column width on wide screens, so the detail columns get the space.
 const NAME_WIDTH: u16 = 24;
 const HELP: &str = " j/↑↓ move · / filter · c m n sort · t group · space mark · p pin · k kill · K kill one · ? help · q quit ";
@@ -96,6 +99,16 @@ fn spark(samples: &VecDeque<f32>, width: usize) -> String {
 }
 
 /// "2.4 GB", "520 MB", "12 KB".
+/// Keep the end of a long path, where the project folder is: `~/work/api/src` → `…/api/src`.
+fn path_tail(path: &str, width: usize) -> String {
+    let length = path.chars().count();
+    if length <= width {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(length - (width - 1)).collect();
+    format!("…{tail}")
+}
+
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
@@ -351,6 +364,7 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let table_area = chunks[2];
     let is_wide = table_area.width >= WIDE_TABLE;
     let is_extra_wide = table_area.width >= EXTRA_WIDE_TABLE;
+    let is_folder_wide = table_area.width >= FOLDER_TABLE;
     let cpu_bar_width = if is_wide { 8 } else { CPU_BAR_WIDTH };
 
     let mut widths = vec![
@@ -374,6 +388,9 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     }
     if is_wide {
         widths.push(Constraint::Length(5));
+    }
+    if is_folder_wide {
+        widths.push(Constraint::Length(FOLDER_WIDTH));
     }
     // On wide screens TREND takes the space left after the fixed columns,
     // minus 10% of the width that goes to NAME instead.
@@ -413,6 +430,9 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     }
     if is_wide {
         header.push("PEAK");
+    }
+    if is_folder_wide {
+        header.push("FOLDER");
     }
     header.push("TREND");
     let header = Row::new(header)
@@ -551,6 +571,10 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
             }
             if is_wide {
                 cells.push(Cell::from(format!("{peak:>5.0}")).style(dim));
+            }
+            if is_folder_wide {
+                let folder = if d.count == 1 { d.cwd.as_str() } else { "" };
+                cells.push(Cell::from(path_tail(folder, FOLDER_WIDTH as usize)).style(dim));
             }
             cells.push(Cell::from(trend).style(trend_style));
             let mut row = Row::new(cells);
@@ -1003,6 +1027,25 @@ mod tests {
         app.set_rows(vec![p]);
         let text = rendered_text(&app, 80, 10);
         assert!(text.contains(":3000"), "listening port should be shown");
+    }
+
+    #[test]
+    fn render_shows_folder_only_on_very_wide_terminals() {
+        let mut app = App::new();
+        let mut p = proc(8981, "node", 30.0, 1.0);
+        p.cwd = "~/work/api".to_string();
+        app.set_rows(vec![p]);
+        let wide = rendered_text(&app, 170, 10);
+        assert!(wide.contains("FOLDER") && wide.contains("~/work/api"));
+        let narrower = rendered_text(&app, 140, 10);
+        assert!(!narrower.contains("FOLDER"));
+    }
+
+    #[test]
+    fn path_tail_keeps_the_end_of_long_paths() {
+        assert_eq!(path_tail("~/app", 24), "~/app");
+        assert_eq!(path_tail("~/work/clients/acme/api/src", 9), "…/api/src");
+        assert_eq!(path_tail("", 24), "");
     }
 
     #[test]

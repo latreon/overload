@@ -1,5 +1,7 @@
 use std::time::Instant;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{
+    CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System, UpdateKind,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct ProcRow {
@@ -17,6 +19,21 @@ pub struct ProcRow {
     /// Listening TCP ports for this pid (filled in by the caller via the
     /// `ports` module; empty when not collected).
     pub ports: Vec<u16>,
+    /// Working directory with the home folder shown as `~`; empty when the
+    /// system does not allow reading it.
+    pub cwd: String,
+}
+
+/// `/Users/me/app` → `~/app` for a home of `/Users/me`.
+fn tilde_path(path: &str, home: &str) -> String {
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 /// System-wide summary shown in the header line.
@@ -93,8 +110,18 @@ impl Collector {
     }
 
     pub fn snapshot(&mut self) -> Vec<ProcRow> {
-        self.sys
-            .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        // Same kinds as `refresh_processes`, plus the working directory (read once per process).
+        self.sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_memory()
+                .with_cpu()
+                .with_disk_usage()
+                .with_exe(UpdateKind::OnlyIfNotSet)
+                .with_cwd(UpdateKind::OnlyIfNotSet),
+        );
+        let home = std::env::var("HOME").unwrap_or_default();
         let elapsed_secs = self.last_snapshot.elapsed().as_secs_f64().max(0.001);
         self.last_snapshot = Instant::now();
         // Some system processes report no start time, which counts from 1970.
@@ -115,6 +142,10 @@ impl Collector {
                 run_time_secs: p.run_time().min(uptime_secs),
                 state: p.status().to_string().to_lowercase(),
                 ports: Vec::new(),
+                cwd: p
+                    .cwd()
+                    .map(|path| tilde_path(&path.to_string_lossy(), &home))
+                    .unwrap_or_default(),
             })
             .collect();
 
@@ -155,6 +186,22 @@ mod tests {
         for r in &rows {
             assert!(r.ram_pct >= 0.0 && r.ram_pct <= 100.0, "ram% in range");
         }
+    }
+
+    #[test]
+    fn tilde_path_replaces_only_a_whole_home_folder() {
+        assert_eq!(tilde_path("/Users/me", "/Users/me"), "~");
+        assert_eq!(tilde_path("/Users/me/app", "/Users/me"), "~/app");
+        assert_eq!(tilde_path("/Users/mel/app", "/Users/me"), "/Users/mel/app");
+        assert_eq!(tilde_path("/tmp", ""), "/tmp");
+    }
+
+    #[test]
+    fn snapshot_reads_the_working_directory_of_this_process() {
+        let mut c = Collector::new();
+        let rows = c.snapshot();
+        let own = rows.iter().find(|r| r.pid == std::process::id()).unwrap();
+        assert!(!own.cwd.is_empty(), "own cwd should be readable");
     }
 
     #[test]
