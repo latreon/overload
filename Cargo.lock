@@ -309,7 +309,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "overload"
+name = "overload-tui"
 version = "0.4.1"
 dependencies = [
  "crossterm",

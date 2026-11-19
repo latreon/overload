@@ -1,10 +1,23 @@
 [package]
-name = "overload"
+name = "overload-tui"
 version = "0.4.1"
 edition = "2021"
 description = "A macOS terminal tool to find and kill resource-hungry processes fast"
 license = "MIT"
 repository = "https://github.com/latreon/overload"
+readme = "README.md"
+keywords = ["tui", "process", "macos", "kill", "monitor"]
+categories = ["command-line-utilities"]
+exclude = ["docs/", "Formula/", ".github/", "CLAUDE.md"]
+
+# The crate name `overload` is taken on crates.io. The command stays `overload`.
+[[bin]]
+name = "overload"
+path = "src/main.rs"
+
+[package.metadata.docs.rs]
+default-target = "aarch64-apple-darwin"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 
 [dependencies]
 ratatui = "0.29"
