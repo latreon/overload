@@ -20,9 +20,7 @@ use std::time::{Duration, Instant};
 
 const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
-const GAUGE_WIDTH: usize = 16;
 const SPARK_WIDTH: usize = 12;
-const CPU_HISTORY_WIDTH: usize = 30;
 /// Narrower tables drop the MEM, DISK/s, UPTIME and PEAK columns.
 const WIDE_TABLE: u16 = 120;
 const HELP: &str = " j/↑↓ move · / filter · c m n sort · t group · space mark · p pin · k kill · K kill one · ? help · q quit ";
@@ -121,8 +119,8 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-/// One plain sentence that names what makes the Mac slow right now.
-fn why_slow(app: &App, stats: &SysStats) -> String {
+/// One plain sentence that names what makes the Mac slow right now, if anything.
+fn why_slow(app: &App, stats: &SysStats) -> Option<String> {
     let mut reasons = Vec::new();
     let busiest = app
         .display
@@ -139,9 +137,9 @@ fn why_slow(app: &App, stats: &SysStats) -> String {
         reasons.push(format!("swap {} in use", format_bytes(stats.swap_used)));
     }
     if reasons.is_empty() {
-        "all calm, nothing heavy right now".to_string()
+        None
     } else {
-        reasons.join(" · ")
+        Some(reasons.join(" · "))
     }
 }
 
@@ -153,87 +151,135 @@ fn fraction(used: u64, total: u64) -> f32 {
     }
 }
 
+/// Yellow from 70%, red from 90%, otherwise the accent color.
+fn level_color(pct: f32) -> Color {
+    if pct >= 90.0 {
+        Color::Red
+    } else if pct >= 70.0 {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    }
+}
+
+/// A boxed stat tile with a small caps title.
+fn tile(title: String, lines: Vec<Line<'_>>) -> Paragraph<'_> {
+    Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(Span::styled(
+                format!(" {title} "),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+    )
+}
+
 fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let area = frame.area();
+    let dim = Style::default().fg(Color::DarkGray);
 
     let chunks = Layout::vertical([
-        Constraint::Length(1), // action / status
-        Constraint::Length(1), // CPU, MEM and SWAP gauges
-        Constraint::Length(1), // CPU history and Mac summary
-        Constraint::Length(1), // sort and order state
-        Constraint::Length(1), // why slow
+        Constraint::Length(4), // stat tiles
+        Constraint::Length(1), // why slow + sort state
         Constraint::Min(0),    // process table
     ])
     .split(area);
 
-    // Action line. While typing a filter it shows the live query; otherwise
-    // it persists the last action (killing…/✓ killed/errors) or a hint.
-    let action = if app.filtering {
-        Paragraph::new(format!("  /{}\u{2588}", app.filter)).style(
+    let tiles = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(chunks[0]);
+    let inner_width = tiles[0].width.saturating_sub(2) as usize;
+    let detail_width = inner_width.saturating_sub(5);
+    let meter_width = inner_width.saturating_sub(1).min(24);
+    let big = |pct: f32| {
+        Span::styled(
+            format!(" {pct:>3.0}%"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(level_color(pct))
                 .add_modifier(Modifier::BOLD),
         )
-    } else {
-        match &app.status {
-            Some(s) => Paragraph::new(format!("  {s}")).style(action_style(s)),
-            None => Paragraph::new("  select a process and press [k] to kill it")
-                .style(Style::default().fg(Color::DarkGray)),
-        }
     };
-    frame.render_widget(action, chunks[0]);
+    let meter = |pct: f32| {
+        Span::styled(
+            format!(
+                " {}",
+                bar(pct / 100.0, meter_width)
+                    .replace('█', "▰")
+                    .replace('░', "▱")
+            ),
+            Style::default().fg(level_color(pct)),
+        )
+    };
+    let detail = |text: String, style: Style| Span::styled(format!("{text:>detail_width$}"), style);
 
-    let dim = Style::default().fg(Color::DarkGray);
-    let swap_fraction = fraction(stats.swap_used, stats.swap_total);
-    let gauges = Line::from(vec![
-        Span::styled(" CPU ", dim),
-        Span::styled(
-            bar(stats.cpu_pct / 100.0, GAUGE_WIDTH),
-            Style::default().fg(gradient(stats.cpu_pct)),
-        ),
-        Span::raw(format!(" {:>3.0}%    ", stats.cpu_pct)),
-        Span::styled("MEM ", dim),
-        Span::styled(
-            bar(stats.mem_pct / 100.0, GAUGE_WIDTH),
-            Style::default().fg(gradient(stats.mem_pct)),
-        ),
-        Span::raw(format!(
-            " {} / {}    ",
-            format_bytes(stats.mem_used),
-            format_bytes(stats.mem_total)
-        )),
-        Span::styled("SWAP ", dim),
-        Span::styled(
-            bar(swap_fraction, GAUGE_WIDTH / 2),
-            Style::default().fg(gradient(swap_fraction * 100.0)),
-        ),
-        Span::raw(format!(
-            " {} / {}",
-            format_bytes(stats.swap_used),
-            format_bytes(stats.swap_total)
-        )),
-    ]);
-    frame.render_widget(Paragraph::new(gauges), chunks[1]);
+    let cpu = tile(
+        format!("CPU · {} cores", stats.cores),
+        vec![
+            Line::from(vec![
+                big(stats.cpu_pct),
+                detail(
+                    spark(&app.cpu_history, detail_width.saturating_sub(1)),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            Line::from(meter(stats.cpu_pct)),
+        ],
+    );
+    let memory = tile(
+        format!("MEMORY · {}", format_bytes(stats.mem_total)),
+        vec![
+            Line::from(vec![
+                big(stats.mem_pct),
+                detail(format!("{} used", format_bytes(stats.mem_used)), dim),
+            ]),
+            Line::from(meter(stats.mem_pct)),
+        ],
+    );
+    let swap_pct = fraction(stats.swap_used, stats.swap_total) * 100.0;
+    let swap = if stats.swap_total == 0 {
+        tile("SWAP".to_string(), vec![Line::styled("  off", dim)])
+    } else {
+        tile(
+            format!("SWAP · {}", format_bytes(stats.swap_total)),
+            vec![
+                Line::from(vec![
+                    big(swap_pct),
+                    detail(format!("{} used", format_bytes(stats.swap_used)), dim),
+                ]),
+                Line::from(meter(swap_pct)),
+            ],
+        )
+    };
+    let mac = tile(
+        format!("MAC · {} procs", stats.proc_count),
+        vec![
+            Line::from(vec![
+                Span::styled(" load ", dim),
+                Span::raw(format!(
+                    "{:.1} {:.1} {:.1}",
+                    stats.load1, stats.load5, stats.load15
+                )),
+            ]),
+            Line::from(vec![
+                Span::styled(" up ", dim),
+                Span::raw(format_duration(stats.uptime_secs)),
+            ]),
+        ],
+    );
+    for (widget, tile_area) in [cpu, memory, swap, mac].into_iter().zip(tiles.iter()) {
+        frame.render_widget(widget, *tile_area);
+    }
 
-    let summary = Line::from(vec![
-        Span::styled(" overload ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(
-            spark(&app.cpu_history, CPU_HISTORY_WIDTH),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled("   load ", dim),
-        Span::raw(format!(
-            "{:.2} {:.2} {:.2}",
-            stats.load1, stats.load5, stats.load15
-        )),
-        Span::styled("   up ", dim),
-        Span::raw(format_duration(stats.uptime_secs)),
-        Span::styled("   cores ", dim),
-        Span::raw(stats.cores.to_string()),
-        Span::styled("   procs ", dim),
-        Span::raw(stats.proc_count.to_string()),
-    ]);
-    frame.render_widget(Paragraph::new(summary), chunks[2]);
+    let why = match why_slow(app, stats) {
+        Some(reason) => Line::from(vec![
+            Span::styled(" ⚠ ", Style::default().fg(Color::Yellow)),
+            Span::styled(reason, Style::default().fg(Color::Yellow)),
+        ]),
+        None => Line::from(vec![
+            Span::styled(" ✓ ", Style::default().fg(Color::Green)),
+            Span::styled("all calm, nothing heavy right now", dim),
+        ]),
+    };
 
     let moved = app.display.iter().filter(|d| d.moves != 0).count();
     let new_rows = app
@@ -246,48 +292,57 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         Sort::Ram => 'm',
         Sort::Name => 'n',
     };
-    let order = if moved == 0 && new_rows == 0 {
-        Span::styled("order matches the sort", Style::default().fg(Color::Green))
-    } else {
-        Span::styled(
-            format!(
-                "order kept {} · {moved} would move · {new_rows} new · {sort_key} to re-sort",
-                format_duration(app.sorted_at.elapsed().as_secs())
-            ),
-            Style::default().fg(Color::Yellow),
+    // Narrow terminals get a short version so the "why slow" text still fits.
+    let is_wide_info = chunks[1].width >= WIDE_TABLE;
+    let sorted = if is_wide_info {
+        format!(
+            "sorted by {} {} ago",
+            app.sort.label(),
+            format_duration(app.sorted_at.elapsed().as_secs())
         )
+    } else {
+        format!("by {}", app.sort.label())
     };
-    let mut order_line = vec![
-        Span::styled(" sort ", dim),
-        Span::styled(
-            format!(" {} ", app.sort.label()),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        ),
-        Span::raw("  "),
-        order,
-        Span::styled(
-            format!("   group {}", if app.grouped { "on" } else { "off" }),
+    let mut order = vec![Span::styled(sorted, dim)];
+    if moved == 0 && new_rows == 0 {
+        order.push(Span::styled(" · up to date ", dim));
+    } else {
+        let accent = Style::default().fg(Color::Yellow);
+        if moved > 0 {
+            let moved_text = if is_wide_info {
+                "out of place"
+            } else {
+                "moved"
+            };
+            order.push(Span::styled(format!(" · {moved} {moved_text}"), accent));
+        }
+        if new_rows > 0 {
+            order.push(Span::styled(format!(" · {new_rows} new"), accent));
+        }
+        order.push(Span::styled(
+            if is_wide_info { " · press " } else { " · " },
             dim,
-        ),
-    ];
-    if !app.filter.is_empty() {
-        order_line.push(Span::styled(format!("   filter /{}", app.filter), dim));
+        ));
+        order.push(Span::styled(
+            format!(" {sort_key} "),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
+        order.push(Span::styled(
+            if is_wide_info {
+                " to sort again "
+            } else {
+                " sort "
+            },
+            dim,
+        ));
     }
-    if !app.marked.is_empty() {
-        order_line.push(Span::styled(format!("   {} marked", app.marked.len()), dim));
-    }
-    if !app.pinned.is_empty() {
-        order_line.push(Span::styled(format!("   {} pinned", app.pinned.len()), dim));
-    }
-    frame.render_widget(Paragraph::new(Line::from(order_line)), chunks[3]);
+    let order = Line::from(order);
+    let info = Layout::horizontal([Constraint::Min(0), Constraint::Length(order.width() as u16)])
+        .split(chunks[1]);
+    frame.render_widget(Paragraph::new(why), info[0]);
+    frame.render_widget(Paragraph::new(order), info[1]);
 
-    let why = Line::from(vec![
-        Span::styled(" why slow? ", dim),
-        Span::styled(why_slow(app, stats), Style::default().fg(Color::Yellow)),
-    ]);
-    frame.render_widget(Paragraph::new(why), chunks[4]);
-
-    let table_area = chunks[5];
+    let table_area = chunks[2];
     let is_wide = table_area.width >= WIDE_TABLE;
 
     // Pin the selected row near the vertical center; the list scrolls around it.
@@ -452,18 +507,44 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         ]);
     }
     widths.push(Constraint::Length(SPARK_WIDTH as u16));
-    let marks = app.marked.len();
-    let title = if marks > 0 {
-        format!(" processes — {marks} marked ")
-    } else {
-        " processes ".to_string()
-    };
+    // The top border carries the brand, the last action and the view state.
+    let mut title = vec![Span::styled(
+        " overload ",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if app.filtering {
+        title.push(Span::styled(
+            format!(" /{}\u{2588} ", app.filter),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(status) = &app.status {
+        title.push(Span::styled(format!(" {status} "), action_style(status)));
+    }
+    let mut view_state = Vec::new();
+    if !app.filtering && !app.filter.is_empty() {
+        view_state.push(format!("filter /{}", app.filter));
+    }
+    if !app.grouped {
+        view_state.push("ungrouped".to_string());
+    }
+    if !app.marked.is_empty() {
+        view_state.push(format!("{} marked", app.marked.len()));
+    }
+    if !app.pinned.is_empty() {
+        view_state.push(format!("{} pinned", app.pinned.len()));
+    }
+    if !view_state.is_empty() {
+        title.push(Span::styled(format!(" {} ", view_state.join(" · ")), dim));
+    }
     let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(title)
-            .title_bottom(HELP),
+            .border_style(dim)
+            .title(Line::from(title))
+            .title_bottom(Span::styled(HELP, dim)),
     );
 
     frame.render_widget(table, table_area);

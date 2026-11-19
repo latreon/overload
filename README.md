@@ -23,10 +23,11 @@ overload --help          # usage
 - `?` — help, with the recent kills
 - `q` — quit
 
-**Live trends & gauges.** Meters show CPU, memory (used / total) and swap. A
-second line shows recent total CPU, load (1, 5, 15 min), uptime, cores and the
-process count. A "why slow?" line names the problem in plain words, for example
-`node uses 95% CPU · swap 1.2 GB in use`. Every row carries a `TREND` sparkline
+**Live trends & gauges.** Four tiles sit at the top: CPU (with recent history),
+memory, swap and the Mac (load for 1, 5, 15 min, uptime, process count). Numbers
+turn yellow at 70% and red at 90%. Under the tiles, one line names the problem
+in plain words, for example `⚠ node uses 95% CPU · swap 1.2 GB in use`, and
+says if the list is out of order. Every row carries a `TREND` sparkline
 of its own recent CPU history. Wide terminals (120+ columns) also show memory
 size, disk speed, uptime and the 60s CPU peak per row.
 
@@ -51,11 +52,11 @@ group. Press `t` to switch to a flat per-process view. Command-line tools
 From the command line, `overload --port 3000` lists what holds a port and
 `overload --kill-port 3000` frees it — the cure for `EADDRINUSE`.
 
-**Layout.** A persistent action line sits at the very top: it shows `killing…`
-after you press `k` and flips to `✓ killed` once the process is gone, staying
-visible until your next action. Below it come the gauges, the system line, the
-sort and order state, and the "why slow?" line. Each row has a heat-colored CPU
-meter (green → yellow → red), and the selected row stays near the center.
+**Layout.** The top border of the process list shows the last action: `killing…`
+after you press `k`, then `✓ killed` once the process is gone, staying visible
+until your next action. It also shows the filter, marked and pinned counts.
+Each row has a heat-colored CPU meter (green → yellow → red), and the selected
+row stays near the center.
 
 System-critical processes (WindowServer, kernel_task, launchd, securityd,
 opendirectoryd, …) are shown greyed and cannot be killed — neither by SIGTERM
