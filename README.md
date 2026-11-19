@@ -1,99 +1,135 @@
+<div align="center">
+
 # overload
 
-A macOS terminal tool to find and kill resource hogs fast.
+**Find and kill the apps that slow down your Mac, right from the terminal.**
+
+[![Release](https://img.shields.io/github/v/release/latreon/overload?color=5fd7ff)](https://github.com/latreon/overload/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7ee787)](LICENSE)
+![macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
 ![overload demo: stat tiles, stable list with MOVE arrows, pin and the help popup](docs/demo.gif)
 
-## Usage
-
-```
-overload                 # launch the interactive TUI
-overload --port 3000     # show what is listening on TCP port 3000
-overload --kill-port 3000  # kill whatever is listening on port 3000
-overload --help          # usage
-```
-
-- `j` / `↑` `↓` — move selection
-- `g` / `G` (or Home/End) — jump to top / bottom; `PgUp` / `PgDn` — page
-- `/` — filter by name (type to narrow, `Esc` clears, `Enter` keeps it)
-- `c` / `m` / `n` — sort by CPU / memory / name
-- `t` — toggle grouping of an app's helper processes
-- `space` — mark/unmark a row for batch kill (`Esc` clears marks)
-- `p` — pin/unpin the selected row on top
-- `k` — kill the selected row, or all marked rows (SIGTERM, then SIGKILL after 2s)
-- `K` — kill only the busiest process of the selected row
-- `?` — help, with the recent kills
-- `q` — quit
-
-**Live trends & gauges.** Four tiles sit at the top: CPU (with recent history),
-memory, swap and the Mac (load for 1, 5, 15 min, uptime, process count). Numbers
-turn yellow at 70% and red at 90%. Under the tiles, one line names the problem
-in plain words, for example `⚠ node uses 95% CPU · swap 1.2 GB in use`, and
-says if the list is out of order. Every row carries a `TREND` sparkline
-of its own recent CPU history. Wide terminals (120+ columns) also show memory
-size, disk reads and writes per second, uptime and the CPU peak per row, and
-140+ columns add the process state and average CPU. On wide screens the name
-column stays narrow and the trend gets the extra space.
-
-**Stable order.** Rows keep their place between refreshes, so the row you look
-at doesn't jump. `MOVE` shows how far a row would move if you sort again (`↑5`,
-`↓7`), new processes get a `NEW` badge at the bottom, and `c` / `m` / `n` sorts
-again.
-
-**Heavy app alert.** A row that stays over 80% CPU for 30 seconds turns red
-(`⚠`) and macOS shows a notification. It can alert again after it cools down.
-The first time, macOS may ask to allow notifications from Script Editor (the
-notice is sent with the built-in `osascript`); allow it to see alerts.
-
-**Multi-select.** Press `space` to mark several rows (`●`), then `k` to kill
-them all at once — handy for clearing a swarm of leftovers. Protected rows are
-skipped.
-
-**Grouping.** By default, an app's helper processes are collapsed into one row
-(`×9  Google Chrome`) showing combined CPU/RAM. Pressing `k` kills the whole
-group. Press `t` to switch to a flat per-process view. Command-line tools
-(node, python, …) stay as individual rows.
-
-**Ports.** Processes listening on a TCP port show it inline (`node  :3000`).
-From the command line, `overload --port 3000` lists what holds a port and
-`overload --kill-port 3000` frees it — the cure for `EADDRINUSE`.
-
-**Layout.** The top border of the process list shows the last action: `killing…`
-after you press `k`, then `✓ killed` once the process is gone, staying visible
-until your next action. It also shows the filter, marked and pinned counts.
-Each row has a heat-colored CPU meter (green → yellow → red), and the selected
-row stays near the center.
-
-System-critical processes (WindowServer, kernel_task, launchd, securityd,
-opendirectoryd, …) are shown greyed and cannot be killed — neither by SIGTERM
-nor by the escalated SIGKILL. PIDs below 100 are protected too, and a recycled
-PID is re-checked before the delayed SIGKILL so a reused slot can't be hit by
-mistake.
-
-## Requirements
-
-- macOS (uses BSD signals and `/usr/sbin/lsof`).
-- Port discovery shells out to `lsof`; it runs with a hard timeout so an
-  unresponsive `lsof` (stale NFS/FUSE mount, slow resolution) can never freeze
-  the UI — ports simply go unshown for that tick.
+</div>
 
 ## Install
 
-### Homebrew
-
-```
+```bash
 brew tap latreon/tap     # once
 brew install overload
-brew upgrade overload    # later, for new versions
 ```
 
-If Homebrew says the tap is untrusted, run `brew trust latreon/tap` once and
-install again.
+Update later with `brew upgrade overload`.
 
-### From source
+> If Homebrew says the tap is untrusted, run `brew trust latreon/tap` once and
+> install again.
 
+## Quick start
+
+```bash
+overload                     # open the live list
+overload --port 3000         # what is listening on port 3000
+overload --kill-port 3000    # free port 3000 (fixes EADDRINUSE)
+overload --help              # all options
 ```
+
+Open it, look at the red rows, select one and press `k`. That's it.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `j` `↓` / `↑` | Move down / up |
+| `g` / `G` | Jump to top / bottom (`PgUp` / `PgDn` page) |
+| `/` | Filter by name (`Esc` clears, `Enter` keeps it) |
+| `c` `m` `n` | Sort by CPU, memory or name |
+| `t` | Group an app's helper processes on or off |
+| `p` | Pin the row on top (press again to unpin) |
+| `space` | Mark a row (`Esc` clears all marks) |
+| `k` | Kill the row, or every marked row |
+| `K` | Kill only the busiest process of the row |
+| `?` | Help with all keys and your recent kills |
+| `q` | Quit |
+
+## Features
+
+### See what is wrong at a glance
+
+- **Four tiles** at the top: CPU (with recent history), memory, swap and the Mac
+  (load for 1, 5 and 15 minutes, uptime, process count).
+- **Calm colors.** Tile numbers turn yellow at 70% and red at 90%. In the list,
+  CPU meters go from green to red as an app gets heavier.
+- **"Why slow?" line** in plain words, for example
+  `⚠ node uses 95% CPU · swap 1.2 GB in use`.
+- **Per-row trend:** a small chart of each app's CPU over the last minute and a
+  half. You see at once if it is climbing or calming down.
+
+### A list that doesn't jump
+
+- **Rows keep their place** between refreshes. The row you look at stays put
+  until you press `c`, `m` or `n` to sort again.
+- **`MOVE`** shows how far a row would move if you sort now (`↑5`, `↓7`).
+- **`NEW`** marks apps that started after your last sort. They wait at the
+  bottom.
+- **Pin** an app with `p` to keep it on top while you watch it.
+
+### More detail on wide screens
+
+| Terminal width | Extra columns |
+| --- | --- |
+| under 120 | `MOVE` `PID` `NAME` `CPU` `RAM` `TREND` |
+| 120 and up | adds `MEM` `READ/s` `WRITE/s` `UPTIME` `PEAK` |
+| 140 and up | adds `STATE` (running, sleeping, …) and `AVG` |
+
+### Heavy app alert
+
+An app that stays over **80% CPU for 30 seconds** turns red (`⚠`) and macOS
+shows a notification. It can alert again after it cools down.
+
+> The first time, macOS may ask to allow notifications from **Script Editor**.
+> overload sends the notice with the built-in `osascript`. Allow it to see
+> alerts.
+
+### Kill the right thing
+
+- **Groups:** an app's helpers show as one row (`×20  Google Chrome`) with
+  combined CPU and memory. `k` kills the whole app, `K` only its busiest
+  process. Press `t` for one row per process.
+- **Batch kill:** mark rows with `space` (`●`), then press `k` once.
+- **Ports:** apps listening on a TCP port show it next to the name
+  (`node  :3000`).
+- **Clear feedback:** the list's top border shows `killing…`, then
+  `✓ killed`. `?` lists your recent kills.
+
+## Safety
+
+- System processes (WindowServer, kernel_task, launchd, securityd,
+  opendirectoryd, …) and every PID below 100 are grey and **can't be killed**.
+- A kill sends `SIGTERM` first and `SIGKILL` only if the app is still alive
+  after 2 seconds.
+- Before that `SIGKILL`, overload checks the PID again. If macOS gave the
+  number to a new protected process in the meantime, nothing is sent.
+- Port lookup runs `/usr/sbin/lsof` with a hard timeout. If `lsof` hangs, ports
+  are simply not shown for that refresh and the screen never freezes.
+
+## Requirements
+
+- macOS (uses BSD signals and `/usr/sbin/lsof`)
+- A terminal at least 80 columns wide. 140+ shows every column.
+
+## Build from source
+
+```bash
+cargo install --git https://github.com/latreon/overload
+```
+
+Or from a clone:
+
+```bash
 cargo install --path .
-# or:
-cargo build --release && mv target/release/overload /usr/local/bin/
 ```
+
+## License
+
+[MIT](LICENSE)
