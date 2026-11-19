@@ -1,6 +1,6 @@
 [package]
 name = "overload-tui"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "A macOS terminal tool to find and kill resource-hungry processes fast"
 license = "MIT"
