@@ -17,13 +17,26 @@ overload --help          # usage
 - `c` / `m` / `n` — sort by CPU / memory / name
 - `t` — toggle grouping of an app's helper processes
 - `space` — mark/unmark a row for batch kill (`Esc` clears marks)
+- `p` — pin/unpin the selected row on top
 - `k` — kill the selected row, or all marked rows (SIGTERM, then SIGKILL after 2s)
+- `K` — kill only the busiest process of the selected row
+- `?` — help, with the recent kills
 - `q` — quit
 
-**Live trends & gauges.** A gauge bar shows overall CPU and memory meters plus a
-sparkline of recent total CPU. Every row carries a `TREND` sparkline of its own
-recent CPU history, so you can see whether a process is climbing or settling —
-not just its current number. Meters use a smooth green→red gradient.
+**Live trends & gauges.** Meters show CPU, memory (used / total) and swap. A
+second line shows recent total CPU, load (1, 5, 15 min), uptime, cores and the
+process count. A "why slow?" line names the problem in plain words, for example
+`node uses 95% CPU · swap 1.2 GB in use`. Every row carries a `TREND` sparkline
+of its own recent CPU history. Wide terminals (120+ columns) also show memory
+size, disk speed, uptime and the 60s CPU peak per row.
+
+**Stable order.** Rows keep their place between refreshes, so the row you look
+at doesn't jump. `MOVE` shows how far a row would move if you sort again (`↑5`,
+`↓7`), new processes get a `NEW` badge at the bottom, and `c` / `m` / `n` sorts
+again.
+
+**Heavy app alert.** A row that stays over 80% CPU for 30 seconds turns red
+(`⚠`) and macOS shows a notification. It can alert again after it cools down.
 
 **Multi-select.** Press `space` to mark several rows (`●`), then `k` to kill
 them all at once — handy for clearing a swarm of leftovers. Protected rows are
@@ -40,12 +53,9 @@ From the command line, `overload --port 3000` lists what holds a port and
 
 **Layout.** A persistent action line sits at the very top: it shows `killing…`
 after you press `k` and flips to `✓ killed` once the process is gone, staying
-visible until your next action. Below it, a summary line shows load average,
-global CPU%, memory used%, process count, and the current sort/group/filter
-state. Each row has a heat-colored CPU/RAM meter (green → yellow → red), and the
-selected row stays pinned near the center. Rows keep their order between
-refreshes and new processes are added at the bottom. Press `c` / `m` / `n` to
-sort again by the active key.
+visible until your next action. Below it come the gauges, the system line, the
+sort and order state, and the "why slow?" line. Each row has a heat-colored CPU
+meter (green → yellow → red), and the selected row stays near the center.
 
 System-critical processes (WindowServer, kernel_task, launchd, securityd,
 opendirectoryd, …) are shown greyed and cannot be killed — neither by SIGTERM

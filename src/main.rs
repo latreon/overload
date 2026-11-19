@@ -5,23 +5,27 @@ mod ports;
 mod ui;
 
 use crate::collector::{Collector, SysStats};
-use crate::ui::{Action, App};
+use crate::ui::{Action, App, Sort, ALERT_CPU};
 use crossterm::event::{self, Event};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
 use std::collections::VecDeque;
 use std::io::{self, stdout};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const REFRESH: Duration = Duration::from_millis(1500);
 const CPU_BAR_WIDTH: usize = 6;
-const RAM_BAR_WIDTH: usize = 4;
+const GAUGE_WIDTH: usize = 16;
 const SPARK_WIDTH: usize = 12;
-const HELP: &str = " j/↑↓ move · / filter · c/m/n sort · t group · space mark · k kill · q quit ";
+const CPU_HISTORY_WIDTH: usize = 30;
+/// Narrower tables drop the MEM, DISK/s, UPTIME and PEAK columns.
+const WIDE_TABLE: u16 = 120;
+const HELP: &str = " j/↑↓ move · / filter · c m n sort · t group · space mark · p pin · k kill · K kill one · ? help · q quit ";
 
 /// Levels for sparkline / bar glyphs, low → high.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -87,14 +91,77 @@ fn spark(samples: &VecDeque<f32>, width: usize) -> String {
     s
 }
 
+/// "2.4 GB", "520 MB", "12 KB".
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == UNITS.len() - 1 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.0} {}", UNITS[unit])
+    }
+}
+
+/// "2d 4h", "6h 12m", "38m", "45s".
+fn format_duration(secs: u64) -> String {
+    let (days, hours, minutes) = (secs / 86_400, secs / 3_600 % 24, secs / 60 % 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// One plain sentence that names what makes the Mac slow right now.
+fn why_slow(app: &App, stats: &SysStats) -> String {
+    let mut reasons = Vec::new();
+    let busiest = app
+        .display
+        .iter()
+        .filter(|d| !d.protected)
+        .max_by(|a, b| a.cpu_pct.total_cmp(&b.cpu_pct));
+    if let Some(d) = busiest.filter(|d| d.cpu_pct >= 25.0) {
+        reasons.push(format!("{} uses {:.0}% CPU", d.label, d.cpu_pct));
+    }
+    if stats.mem_pct >= 80.0 {
+        reasons.push(format!("memory {:.0}% full", stats.mem_pct));
+    }
+    if stats.swap_used >= 1 << 30 {
+        reasons.push(format!("swap {} in use", format_bytes(stats.swap_used)));
+    }
+    if reasons.is_empty() {
+        "all calm, nothing heavy right now".to_string()
+    } else {
+        reasons.join(" · ")
+    }
+}
+
+fn fraction(used: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        used as f32 / total as f32
+    }
+}
+
 fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     let area = frame.area();
 
-    // Top: action line, gauge bar, summary line, then the table.
     let chunks = Layout::vertical([
         Constraint::Length(1), // action / status
-        Constraint::Length(1), // CPU/MEM gauges + CPU history sparkline
-        Constraint::Length(1), // system summary
+        Constraint::Length(1), // CPU, MEM and SWAP gauges
+        Constraint::Length(1), // CPU history and Mac summary
+        Constraint::Length(1), // sort and order state
+        Constraint::Length(1), // why slow
         Constraint::Min(0),    // process table
     ])
     .split(area);
@@ -116,45 +183,112 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     };
     frame.render_widget(action, chunks[0]);
 
-    // Gauge bar: colored CPU and MEM meters + a sparkline of recent CPU.
+    let dim = Style::default().fg(Color::DarkGray);
+    let swap_fraction = fraction(stats.swap_used, stats.swap_total);
     let gauges = Line::from(vec![
-        Span::raw(" CPU "),
+        Span::styled(" CPU ", dim),
         Span::styled(
-            bar(stats.cpu_pct / 100.0, 10),
+            bar(stats.cpu_pct / 100.0, GAUGE_WIDTH),
             Style::default().fg(gradient(stats.cpu_pct)),
         ),
-        Span::raw(format!(" {:>3.0}%   ", stats.cpu_pct)),
-        Span::raw("MEM "),
+        Span::raw(format!(" {:>3.0}%    ", stats.cpu_pct)),
+        Span::styled("MEM ", dim),
         Span::styled(
-            bar(stats.mem_pct / 100.0, 10),
+            bar(stats.mem_pct / 100.0, GAUGE_WIDTH),
             Style::default().fg(gradient(stats.mem_pct)),
         ),
-        Span::raw(format!(" {:>3.0}%   ", stats.mem_pct)),
+        Span::raw(format!(
+            " {} / {}    ",
+            format_bytes(stats.mem_used),
+            format_bytes(stats.mem_total)
+        )),
+        Span::styled("SWAP ", dim),
         Span::styled(
-            spark(&app.cpu_history, SPARK_WIDTH),
-            Style::default().fg(Color::Cyan),
+            bar(swap_fraction, GAUGE_WIDTH / 2),
+            Style::default().fg(gradient(swap_fraction * 100.0)),
         ),
+        Span::raw(format!(
+            " {} / {}",
+            format_bytes(stats.swap_used),
+            format_bytes(stats.swap_total)
+        )),
     ]);
     frame.render_widget(Paragraph::new(gauges), chunks[1]);
 
-    // System summary line, including current view mode.
-    let filter_part = if app.filter.is_empty() {
-        String::new()
-    } else {
-        format!("   /{}", app.filter)
-    };
-    let summary = Paragraph::new(format!(
-        " overload   load {:.2}   {} procs   ·   sort:{}   group:{}{}",
-        stats.load1,
-        stats.proc_count,
-        app.sort.label(),
-        if app.grouped { "on" } else { "off" },
-        filter_part,
-    ))
-    .style(Style::default().add_modifier(Modifier::BOLD));
-    frame.render_widget(summary, chunks[2]);
+    let summary = Line::from(vec![
+        Span::styled(" overload ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            spark(&app.cpu_history, CPU_HISTORY_WIDTH),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled("   load ", dim),
+        Span::raw(format!(
+            "{:.2} {:.2} {:.2}",
+            stats.load1, stats.load5, stats.load15
+        )),
+        Span::styled("   up ", dim),
+        Span::raw(format_duration(stats.uptime_secs)),
+        Span::styled("   cores ", dim),
+        Span::raw(stats.cores.to_string()),
+        Span::styled("   procs ", dim),
+        Span::raw(stats.proc_count.to_string()),
+    ]);
+    frame.render_widget(Paragraph::new(summary), chunks[2]);
 
-    let table_area = chunks[3];
+    let moved = app.display.iter().filter(|d| d.moves != 0).count();
+    let new_rows = app
+        .display
+        .iter()
+        .filter(|d| !app.sorted_keys.contains(&d.key))
+        .count();
+    let sort_key = match app.sort {
+        Sort::Cpu => 'c',
+        Sort::Ram => 'm',
+        Sort::Name => 'n',
+    };
+    let order = if moved == 0 && new_rows == 0 {
+        Span::styled("order matches the sort", Style::default().fg(Color::Green))
+    } else {
+        Span::styled(
+            format!(
+                "order kept {} · {moved} would move · {new_rows} new · {sort_key} to re-sort",
+                format_duration(app.sorted_at.elapsed().as_secs())
+            ),
+            Style::default().fg(Color::Yellow),
+        )
+    };
+    let mut order_line = vec![
+        Span::styled(" sort ", dim),
+        Span::styled(
+            format!(" {} ", app.sort.label()),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ),
+        Span::raw("  "),
+        order,
+        Span::styled(
+            format!("   group {}", if app.grouped { "on" } else { "off" }),
+            dim,
+        ),
+    ];
+    if !app.filter.is_empty() {
+        order_line.push(Span::styled(format!("   filter /{}", app.filter), dim));
+    }
+    if !app.marked.is_empty() {
+        order_line.push(Span::styled(format!("   {} marked", app.marked.len()), dim));
+    }
+    if !app.pinned.is_empty() {
+        order_line.push(Span::styled(format!("   {} pinned", app.pinned.len()), dim));
+    }
+    frame.render_widget(Paragraph::new(Line::from(order_line)), chunks[3]);
+
+    let why = Line::from(vec![
+        Span::styled(" why slow? ", dim),
+        Span::styled(why_slow(app, stats), Style::default().fg(Color::Yellow)),
+    ]);
+    frame.render_widget(Paragraph::new(why), chunks[4]);
+
+    let table_area = chunks[5];
+    let is_wide = table_area.width >= WIDE_TABLE;
 
     // Pin the selected row near the vertical center; the list scrolls around it.
     let view_h = (table_area.height.saturating_sub(3)).max(1) as usize; // borders + header
@@ -166,7 +300,12 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     };
     let end = (offset + view_h).min(len);
 
-    let header = Row::new(vec![" ", "PID", "CPU", "RAM", "TREND", "NAME"])
+    let mut header = vec![" ", "MOVE", "PID", "NAME", "CPU", "RAM"];
+    if is_wide {
+        header.extend(["MEM", "DISK/s", "UPTIME", "PEAK"]);
+    }
+    header.push("TREND");
+    let header = Row::new(header)
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     let rows: Vec<Row> = app.display[offset..end]
@@ -202,10 +341,42 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
                     .join(" :");
                 format!("  :{list}")
             };
-            let name = if d.protected {
-                format!("{}{ports} · protected", d.label)
+            let is_alerted = app.is_alerted(&d.key);
+            let label_style = if d.protected {
+                dim
+            } else if is_alerted {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
-                format!("{}{ports}", d.label)
+                Style::default()
+            };
+            let mut name = Vec::new();
+            if app.pinned.contains(&d.key) {
+                name.push(Span::styled("◆ ", Style::default().fg(Color::Yellow)));
+            }
+            if is_alerted {
+                name.push(Span::styled("⚠ ", label_style));
+            }
+            name.push(Span::styled(d.label.clone(), label_style));
+            name.push(Span::styled(ports, Style::default().fg(Color::Cyan)));
+            if d.protected {
+                name.push(Span::styled(" · protected", dim));
+            }
+            if !app.sorted_keys.contains(&d.key) {
+                name.push(Span::raw(" "));
+                name.push(Span::styled(
+                    " NEW ",
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                ));
+            }
+
+            let move_cell = match d.moves {
+                0 => Cell::from("·").style(dim),
+                up if up > 0 => {
+                    Cell::from(format!("↑{up}")).style(Style::default().fg(Color::Green))
+                }
+                down => {
+                    Cell::from(format!("↓{}", -down)).style(Style::default().fg(Color::LightRed))
+                }
             };
 
             let cpu_txt = format!(
@@ -213,31 +384,19 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
                 bar(d.cpu_pct / 100.0, CPU_BAR_WIDTH),
                 d.cpu_pct
             );
-            let ram_txt = format!(
-                "{} {:>4.1}",
-                bar(d.ram_pct / 100.0, RAM_BAR_WIDTH),
-                d.ram_pct
-            );
-            let trend = app
-                .history
-                .get(&d.key)
-                .map(|h| spark(h, SPARK_WIDTH))
-                .unwrap_or_default();
+            let history = app.history.get(&d.key);
+            let trend = history.map(|h| spark(h, SPARK_WIDTH)).unwrap_or_default();
+            let peak = history
+                .and_then(|h| h.iter().copied().reduce(f32::max))
+                .unwrap_or(d.cpu_pct);
 
-            let (cpu_cell, ram_cell, trend_cell, name_cell) = if d.protected {
-                let grey = Style::default().fg(Color::DarkGray);
-                (
-                    Cell::from(cpu_txt).style(grey),
-                    Cell::from(ram_txt).style(grey),
-                    Cell::from(trend).style(grey),
-                    Cell::from(name).style(grey),
-                )
+            let (cpu_style, ram_style, trend_style) = if d.protected {
+                (dim, dim, dim)
             } else {
                 (
-                    Cell::from(cpu_txt).style(Style::default().fg(gradient(d.cpu_pct))),
-                    Cell::from(ram_txt).style(Style::default().fg(gradient(d.ram_pct))),
-                    Cell::from(trend).style(Style::default().fg(Color::Cyan)),
-                    Cell::from(name),
+                    Style::default().fg(gradient(d.cpu_pct)),
+                    Style::default().fg(gradient(d.ram_pct)),
+                    Style::default().fg(Color::Cyan),
                 )
             };
 
@@ -247,14 +406,24 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
                 Color::Blue
             }));
 
-            let mut row = Row::new(vec![
+            let mut cells = vec![
                 marker_cell,
-                Cell::from(id),
-                cpu_cell,
-                ram_cell,
-                trend_cell,
-                name_cell,
-            ]);
+                move_cell,
+                Cell::from(id).style(dim),
+                Cell::from(Line::from(name)),
+                Cell::from(cpu_txt).style(cpu_style),
+                Cell::from(format!("{:>4.1}%", d.ram_pct)).style(ram_style),
+            ];
+            if is_wide {
+                cells.extend([
+                    Cell::from(format!("{:>8}", format_bytes(d.mem_bytes))),
+                    Cell::from(format!("{:>8}", format_bytes(d.disk_per_sec))).style(dim),
+                    Cell::from(format_duration(d.run_time_secs)).style(dim),
+                    Cell::from(format!("{peak:>4.0}")).style(dim),
+                ]);
+            }
+            cells.push(Cell::from(trend).style(trend_style));
+            let mut row = Row::new(cells);
             if idx == app.selected {
                 row = row.style(
                     Style::default()
@@ -266,14 +435,23 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
         })
         .collect();
 
-    let widths = [
+    let mut widths = vec![
         Constraint::Length(1),
+        Constraint::Length(4),
         Constraint::Length(6),
+        Constraint::Min(12),
         Constraint::Length(CPU_BAR_WIDTH as u16 + 5),
-        Constraint::Length(RAM_BAR_WIDTH as u16 + 6),
-        Constraint::Length(SPARK_WIDTH as u16),
-        Constraint::Min(8),
+        Constraint::Length(6),
     ];
+    if is_wide {
+        widths.extend([
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(4),
+        ]);
+    }
+    widths.push(Constraint::Length(SPARK_WIDTH as u16));
     let marks = app.marked.len();
     let title = if marks > 0 {
         format!(" processes — {marks} marked ")
@@ -289,6 +467,99 @@ fn render(frame: &mut Frame, app: &App, stats: &SysStats) {
     );
 
     frame.render_widget(table, table_area);
+
+    if app.show_help {
+        render_help(frame, app, area);
+    }
+}
+
+/// Centered popup with every key and the recent kills.
+fn render_help(frame: &mut Frame, app: &App, area: Rect) {
+    let keys = [
+        ("j / ↓  ↑", "move"),
+        ("g / G", "jump to top / bottom"),
+        ("/", "filter by name"),
+        ("c m n", "sort by CPU, memory, name"),
+        ("t", "group helpers on or off"),
+        ("space", "mark a row, Esc clears marks"),
+        ("p", "pin the row on top"),
+        ("k", "kill the row or all marked rows"),
+        ("K", "kill only the busiest process of the row"),
+        ("?", "show this help"),
+        ("q", "quit"),
+    ];
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut lines: Vec<Line> = keys
+        .iter()
+        .map(|(key_names, text)| {
+            Line::from(vec![
+                Span::styled(format!("  {key_names:<10}"), bold.fg(Color::Cyan)),
+                Span::raw(*text),
+            ])
+        })
+        .collect();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled("  Recent kills", bold));
+    if app.kill_log.is_empty() {
+        lines.push(Line::styled("  none yet", dim));
+    }
+    for (killed_at, label) in app.kill_log.iter().rev() {
+        lines.push(Line::raw(format!(
+            "  {:>7} ago  {label}",
+            format_duration(killed_at.elapsed().as_secs())
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "  Rows stay in place until you sort again.",
+        dim,
+    ));
+    lines.push(Line::styled(
+        format!("  Rows over {ALERT_CPU:.0}% CPU for 30s turn red and send a notice."),
+        dim,
+    ));
+    lines.push(Line::styled("  Press any key to close.", dim));
+
+    let width = 66.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" help "),
+        ),
+        popup,
+    );
+}
+
+/// Show a macOS notice. The text goes in as an argument, never into the script.
+fn notify(label: &str) {
+    let message = format!("{label} over {ALERT_CPU:.0}% CPU for 30s");
+    let child = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "display notification (item 1 of argv) with title \"overload\"",
+            "-e",
+            "end run",
+            &message,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 /// RAII guard that restores the terminal on every exit path — including panics.
@@ -347,7 +618,9 @@ USAGE:
 
 TUI KEYS:
     j / ↑ ↓   move      g / G   top / bottom     / filter
-    c m n     sort      t       group helpers    k kill   q quit";
+    c m n     sort      t       group helpers    space mark
+    p         pin       k       kill             K kill busiest only
+    ?         help      q       quit";
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -489,6 +762,9 @@ fn run<B: Backend>(
         if last.elapsed() >= REFRESH {
             // set_rows rebuilds the view and keeps the cursor on the same row.
             app.set_rows(snapshot_with_ports(collector));
+            for label in app.new_alerts.drain(..) {
+                notify(&label);
+            }
             *stats = collector.system_stats();
             app.record_cpu(stats.cpu_pct);
             *last = Instant::now();
@@ -508,6 +784,7 @@ mod tests {
             cpu_pct: 78.0,
             mem_pct: 61.0,
             proc_count: 3,
+            ..Default::default()
         }
     }
 
@@ -517,7 +794,7 @@ mod tests {
             name: name.to_string(),
             cpu_pct: cpu,
             ram_pct: ram,
-            ports: vec![],
+            ..Default::default()
         }
     }
 
@@ -578,7 +855,7 @@ mod tests {
         let mut p = proc(8981, "node", 30.0, 1.0);
         p.ports = vec![3000];
         app.set_rows(vec![p]);
-        let text = rendered_text(&app, 80, 8);
+        let text = rendered_text(&app, 80, 10);
         assert!(text.contains(":3000"), "listening port should be shown");
     }
 

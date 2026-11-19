@@ -1,25 +1,38 @@
+use std::time::Instant;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProcRow {
     pub pid: u32,
     pub name: String,
     pub cpu_pct: f32,
     pub ram_pct: f32,
+    pub mem_bytes: u64,
+    /// Disk read + write since the previous snapshot, per second.
+    pub disk_per_sec: u64,
+    pub run_time_secs: u64,
     /// Listening TCP ports for this pid (filled in by the caller via the
     /// `ports` module; empty when not collected).
     pub ports: Vec<u16>,
 }
 
 /// System-wide summary shown in the header line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SysStats {
-    /// 1-minute load average.
+    /// 1, 5 and 15 minute load averages.
     pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
     /// Global CPU usage across all cores, 0..=100.
     pub cpu_pct: f32,
     /// Used memory as a percentage of total, 0..=100.
     pub mem_pct: f32,
+    pub mem_used: u64,
+    pub mem_total: u64,
+    pub swap_used: u64,
+    pub swap_total: u64,
+    pub uptime_secs: u64,
+    pub cores: usize,
     /// Number of processes seen in the last snapshot.
     pub proc_count: usize,
 }
@@ -27,6 +40,7 @@ pub struct SysStats {
 pub struct Collector {
     sys: System,
     total_mem: u64,
+    last_snapshot: Instant,
 }
 
 impl Default for Collector {
@@ -45,7 +59,11 @@ impl Collector {
         );
         sys.refresh_memory();
         let total_mem = sys.total_memory().max(1);
-        Collector { sys, total_mem }
+        Collector {
+            sys,
+            total_mem,
+            last_snapshot: Instant::now(),
+        }
     }
 
     /// System-wide summary. Global CPU usage is meaningful only after two
@@ -54,10 +72,19 @@ impl Collector {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         let used = self.sys.used_memory();
+        let load = System::load_average();
         SysStats {
-            load1: System::load_average().one,
+            load1: load.one,
+            load5: load.five,
+            load15: load.fifteen,
             cpu_pct: self.sys.global_cpu_usage(),
             mem_pct: (used as f64 / self.total_mem as f64 * 100.0) as f32,
+            mem_used: used,
+            mem_total: self.total_mem,
+            swap_used: self.sys.used_swap(),
+            swap_total: self.sys.total_swap(),
+            uptime_secs: System::uptime(),
+            cores: self.sys.cpus().len(),
             proc_count: self.sys.processes().len(),
         }
     }
@@ -65,6 +92,8 @@ impl Collector {
     pub fn snapshot(&mut self) -> Vec<ProcRow> {
         self.sys
             .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let elapsed_secs = self.last_snapshot.elapsed().as_secs_f64().max(0.001);
+        self.last_snapshot = Instant::now();
 
         let mut rows: Vec<ProcRow> = self
             .sys
@@ -75,6 +104,10 @@ impl Collector {
                 name: p.name().to_string_lossy().to_string(),
                 cpu_pct: p.cpu_usage(),
                 ram_pct: (p.memory() as f64 / self.total_mem as f64 * 100.0) as f32,
+                mem_bytes: p.memory(),
+                disk_per_sec: ((p.disk_usage().read_bytes + p.disk_usage().written_bytes) as f64
+                    / elapsed_secs) as u64,
+                run_time_secs: p.run_time(),
                 ports: Vec::new(),
             })
             .collect();

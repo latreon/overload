@@ -2,9 +2,15 @@ use crate::classifier::{classify, Protection};
 use crate::collector::ProcRow;
 use crossterm::event::KeyCode;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 /// How many CPU samples to retain per row and for the global history.
 pub const HISTORY_LEN: usize = 60;
+/// A row that stays at or above this CPU % for `ALERT_SAMPLES` refreshes
+/// (about 30s) raises a heavy app alert.
+pub const ALERT_CPU: f32 = 80.0;
+const ALERT_SAMPLES: usize = 20;
+const KILL_LOG_LEN: usize = 10;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -44,6 +50,13 @@ pub struct DisplayRow {
     pub protected: bool,
     /// Listening TCP ports (union across the group's members), sorted.
     pub ports: Vec<u16>,
+    pub mem_bytes: u64,
+    pub disk_per_sec: u64,
+    /// Run time of the oldest member.
+    pub run_time_secs: u64,
+    /// How many places the row would move up (positive) or down (negative)
+    /// if the list were sorted again now.
+    pub moves: i32,
 }
 
 /// Collapse a process name to its app group by trimming helper/parenthetical
@@ -77,6 +90,18 @@ pub struct App {
     pub cpu_history: VecDeque<f32>,
     /// Rows the user has marked for batch kill, by display-row key.
     pub marked: HashSet<String>,
+    /// Rows kept at the top of the list, by display-row key.
+    pub pinned: HashSet<String>,
+    /// Rows seen at the last sort. Anything else is shown as new.
+    pub sorted_keys: HashSet<String>,
+    pub sorted_at: Instant,
+    /// Rows currently over the alert limit, so each alert fires once.
+    alerted: HashSet<String>,
+    /// Alerts raised by the last refresh, taken by the event loop.
+    pub new_alerts: Vec<String>,
+    /// Recent confirmed kills, newest last.
+    pub kill_log: VecDeque<(Instant, String)>,
+    pub show_help: bool,
 }
 
 impl App {
@@ -94,6 +119,13 @@ impl App {
             history: HashMap::new(),
             cpu_history: VecDeque::new(),
             marked: HashSet::new(),
+            pinned: HashSet::new(),
+            sorted_keys: HashSet::new(),
+            sorted_at: Instant::now(),
+            alerted: HashSet::new(),
+            new_alerts: Vec::new(),
+            kill_log: VecDeque::new(),
+            show_help: false,
         }
     }
 
@@ -126,6 +158,10 @@ impl App {
             let alive: Vec<u32> = pids.into_iter().filter(|p| present.contains(p)).collect();
             if alive.is_empty() {
                 self.status = Some(format!("✓ killed {label}"));
+                self.kill_log.push_back((Instant::now(), label));
+                if self.kill_log.len() > KILL_LOG_LEN {
+                    self.kill_log.pop_front();
+                }
             } else {
                 self.pending.push((alive, label));
             }
@@ -133,6 +169,38 @@ impl App {
 
         self.rebuild(true);
         self.sample_history();
+        self.check_alerts();
+    }
+
+    /// Raise one alert per row that stayed over `ALERT_CPU` for the last
+    /// `ALERT_SAMPLES` refreshes. The row can alert again after it cools down.
+    fn check_alerts(&mut self) {
+        let mut still_hot = HashSet::new();
+        for d in &self.display {
+            if d.protected || d.cpu_pct < ALERT_CPU {
+                continue;
+            }
+            let hot_samples = self.history.get(&d.key).map_or(0, |history| {
+                history
+                    .iter()
+                    .rev()
+                    .take_while(|&&cpu| cpu >= ALERT_CPU)
+                    .count()
+            });
+            if hot_samples < ALERT_SAMPLES {
+                continue;
+            }
+            still_hot.insert(d.key.clone());
+            if !self.alerted.contains(&d.key) {
+                self.status = Some(format!("⚠ {} over {ALERT_CPU:.0}% CPU for 30s", d.label));
+                self.new_alerts.push(d.label.clone());
+            }
+        }
+        self.alerted = still_hot;
+    }
+
+    pub fn is_alerted(&self, row_key: &str) -> bool {
+        self.alerted.contains(row_key)
     }
 
     /// Append the current CPU value to each visible row's history, carrying
@@ -186,9 +254,16 @@ impl App {
                     count: 0,
                     protected: false,
                     ports: Vec::new(),
+                    mem_bytes: 0,
+                    disk_per_sec: 0,
+                    run_time_secs: 0,
+                    moves: 0,
                 });
                 entry.cpu_pct += r.cpu_pct;
                 entry.ram_pct += r.ram_pct;
+                entry.mem_bytes += r.mem_bytes;
+                entry.disk_per_sec += r.disk_per_sec;
+                entry.run_time_secs = entry.run_time_secs.max(r.run_time_secs);
                 entry.pids.push(r.pid);
                 entry.count += 1;
                 entry.protected = entry.protected || protected;
@@ -214,6 +289,10 @@ impl App {
                     count: 1,
                     protected: classify(&r.name, r.pid) == Protection::Protected,
                     ports: r.ports.clone(),
+                    mem_bytes: r.mem_bytes,
+                    disk_per_sec: r.disk_per_sec,
+                    run_time_secs: r.run_time_secs,
+                    moves: 0,
                 })
                 .collect()
         };
@@ -233,8 +312,23 @@ impl App {
                 display.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
             }
         }
-        display.sort_by_key(|d| previous_order.get(&d.key).copied().unwrap_or(usize::MAX));
+        display.sort_by_key(|d| !self.pinned.contains(&d.key));
+        let sorted_rank: HashMap<String, usize> = display
+            .iter()
+            .enumerate()
+            .map(|(index, d)| (d.key.clone(), index))
+            .collect();
 
+        display.sort_by_key(|d| previous_order.get(&d.key).copied().unwrap_or(usize::MAX));
+        display.sort_by_key(|d| !self.pinned.contains(&d.key));
+        for (index, d) in display.iter_mut().enumerate() {
+            d.moves = index as i32 - sorted_rank[&d.key] as i32;
+        }
+
+        if !keep_order || self.display.is_empty() {
+            self.sorted_keys = display.iter().map(|d| d.key.clone()).collect();
+            self.sorted_at = Instant::now();
+        }
         self.display = display;
 
         // Keep the cursor on the same row identity; otherwise clamp.
@@ -251,6 +345,10 @@ impl App {
     pub fn handle_key(&mut self, code: KeyCode) -> Action {
         if self.filtering {
             return self.handle_filter_key(code);
+        }
+        if self.show_help {
+            self.show_help = false;
+            return Action::None;
         }
 
         let len = self.display.len();
@@ -321,8 +419,34 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.grouped = !self.grouped;
-                self.rebuild(true);
+                self.rebuild(false);
                 Action::None
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                Action::None
+            }
+            KeyCode::Char('p') => {
+                if let Some(d) = self.display.get(self.selected) {
+                    let row_key = d.key.clone();
+                    if !self.pinned.remove(&row_key) {
+                        self.pinned.insert(row_key);
+                    }
+                    self.rebuild(true);
+                }
+                Action::None
+            }
+            KeyCode::Char('K') => {
+                // Collector rows come busiest first, so the first pid is the busiest member.
+                let Some(d) = self.display.get(self.selected) else {
+                    return Action::None;
+                };
+                if d.protected {
+                    self.status = Some(format!("{} is protected — not killed", d.label));
+                    return Action::None;
+                }
+                let pid = d.pids[0];
+                Action::Kill(vec![pid], format!("{} ({pid})", d.label))
             }
             KeyCode::Char('k') => {
                 if !self.marked.is_empty() {
@@ -402,7 +526,7 @@ mod tests {
             name: name.to_string(),
             cpu_pct: cpu,
             ram_pct: 0.0,
-            ports: vec![],
+            ..Default::default()
         }
     }
 
@@ -412,7 +536,7 @@ mod tests {
             name: name.to_string(),
             cpu_pct: cpu,
             ram_pct: ram,
-            ports: vec![],
+            ..Default::default()
         }
     }
 
