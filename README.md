@@ -108,6 +108,11 @@ It waits up to 2.5 seconds, so the `SIGKILL` fallback has time to run. Exit code
 | under 120 | `MOVE` `PID` `NAME` `CPU` `RAM` `TREND` |
 | 120 and up | adds `MEM` `READ/s` `WRITE/s` `UPTIME` `PEAK` |
 | 140 and up | adds `STATE` (running, sleeping, …) and `AVG` |
+| 160 and up | adds `FOLDER`, the folder a process was started from (`~/work/api`) |
+
+`FOLDER` tells apart several `node` or `python` processes, such as dev servers. It is
+shown for single-process rows. Grouped rows (`×20 Google Chrome`) leave it empty, and so
+do processes macOS does not let you inspect. Long paths keep their end: `…/clients/api`.
 
 ### Heavy app alert
 
